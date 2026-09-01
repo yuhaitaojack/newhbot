@@ -3,7 +3,7 @@
 本文整理当前已确认的全部需求。未在本文出现的能力视为未确认，实现前必须先更新本文。
 
 **产品：** 基于 Hummingbot + Hyperliquid 的单策略自动合约交易系统。  
-**当前阶段：** PHASE 0 仅建立安全开发基础。核心业务尚未实现。
+**当前阶段：** PHASE 1 架构研究完成；核心业务尚未实现。
 
 ## 1. 交易范围
 
@@ -30,14 +30,15 @@
 
 ## 3. 应用能力
 
-- Web UI。
-- SQLite 持久化。
-- Docker Compose 部署。
-- 支持 Windows / macOS / Linux。
-- 策略文件上传与版本管理。
-- 策略参数可启用 / 关闭。
+- Web UI：状态、交易记录、控制、配置。不做 K 线；K 线由用户在 TradingView 查看。
+- SQLite 持久化（PHASE 1 结论：PostgreSQL 不必要）。
+- 生产部署推荐 Docker Compose；Windows / macOS / Linux 均可部署；Apple Silicon (ARM64) 作为目标之一。
+- 策略文件上传与版本管理（`strategy.py` + `manifest.yaml`）。
+- 策略参数可启用 / 关闭：关闭用策略默认值，开启用数据库用户配置。
+- 策略本身负责止盈止损逻辑；平仓只能由策略 `CLOSE` 或人工平仓触发。
 - 所有设置永久保存。
-- 重启或故障后自动恢复（先对账，再按持久化状态继续；不自动开新仓）。
+- 重启或故障后自动恢复（先对账，再按持久化状态继续；Recovery 禁止开新仓）。
+- 架构须预留远程访问的认证与网络安全（默认不公网暴露）。
 
 ## 4. Web UI 控制
 
@@ -64,7 +65,10 @@ Web UI 必须提供：
 - 多账户、多策略并行、多币种同时交易。
 - 策略直接调用交易所。
 - 自动反手 / 对冲 / 同时双向持仓。
-- 在 PHASE 0 实现核心交易、UI、数据库 schema、Docker 编排或 Hummingbot 集成。
+- 在 PHASE 0 / PHASE 1 实现核心交易、UI、数据库 schema、Docker 编排或 Hummingbot 集成。
+- K 线 UI、回测系统、高频交易、AI 交易、多微服务、Kubernetes、Redis、Kafka。
+- 采用 Hummingbot Strategy V2 Controller / PositionExecutor 作为策略决策层（它们会自己下单并自管止盈止损）。
+- 采用 hummingbot-api 全家桶（PostgreSQL + EMQX + Docker-in-Docker 多 bot）作为本项目后端。
 
 ## 7. 后续实现时的已知约束（供设计，不在本 Phase 实现）
 
@@ -73,6 +77,13 @@ Web UI 必须提供：
 - Windows 上官方推荐 Hummingbot 走 **Docker Desktop + WSL2**，或 WSL2 内源码安装。
 - 主网与 testnet 必须严格隔离；默认不得使用主网。
 
-## 8. 需求来源
+## 8. PHASE 1 增补的执行约束
 
-来自项目发起说明（PHASE 0 任务书）。若后续 Phase 增补需求，必须先改本文件再写代码。
+- 开仓前必须再次查询 Hyperliquid 真实持仓。
+- 订单状态不确定（UNKNOWN）时禁止重复下单。
+- 真正下单只允许 Trading Controller → Execution Worker；策略进程禁止接触 connector。
+- 推荐架构见 `docs/ARCHITECTURE.md`（方案 D）。
+
+## 9. 需求来源
+
+PHASE 0 任务书 + PHASE 1 架构研究确认项。若后续 Phase 增补需求，必须先改本文件再写代码。
