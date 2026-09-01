@@ -1,0 +1,9 @@
+name: example_hold
+version: "1"
+parameters:
+  - name: lookback
+    type: int
+    default: 20
+    min: 1
+    max: 200
+    description: Unused example parameter

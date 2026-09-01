@@ -14,11 +14,17 @@ credentials/
 # Local data and persistence
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
-data/
-logs/
+/data/*
+!/data/.gitkeep
+/logs/*
+!/logs/.gitkeep
+backend/data/
 *.log
+pytest-cache-files*/
 
 # Python
 __pycache__/

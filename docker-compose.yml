@@ -1,0 +1,48 @@
+# Compose V2. Relative bind mounts work on Windows Docker Desktop.
+# Strategy Runtime stays in-process in the backend container (PHASE 2).
+# Future sandbox: add a strategy-runtime service that speaks the same
+# StrategyRuntime.evaluate() interface; do not let it call execution-worker.
+
+services:
+  execution-worker:
+    build:
+      context: ./execution-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: INFO
+    volumes:
+      - ./logs:/app/logs
+    expose:
+      - "8001"
+    # Internal only. Do not publish to the public internet.
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - execution-worker
+    environment:
+      LOG_LEVEL: INFO
+      DATABASE_URL: sqlite+aiosqlite:///./data/newhbot.db
+      EXECUTION_WORKER_URL: http://execution-worker:8001
+      EXECUTION_MODE: mock
+      CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./strategies:/app/strategies
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8080:80"
