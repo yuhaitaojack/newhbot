@@ -1,0 +1,18 @@
+---
+description: Hard trading safety invariants. Always follow AGENTS.md.
+alwaysApply: true
+---
+
+# Trading Safety
+
+Read and obey `AGENTS.md` before any code change.
+
+- Strategy code must only emit `LONG` / `SHORT` / `CLOSE` / `HOLD`. It must never place orders.
+- All orders go through Trading Controller. Do not bypass it.
+- At most one live position. With an open position, reject new `LONG` / `SHORT`.
+- No automatic reverse: close first; a new open requires a later independent signal.
+- Hyperliquid exchange state outranks local SQLite / cache.
+- Recovery mode: no opens. Trading-related settings must persist.
+- Never commit real keys. Never live-trade without explicit user confirmation.
+- Do not weaken tests to hide product bugs.
+- Each Phase ends with a report, then stop. Do not start the next Phase unasked.
