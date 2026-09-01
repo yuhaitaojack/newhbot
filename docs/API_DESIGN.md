@@ -39,21 +39,25 @@ Not published to the public internet in Compose (`expose` only). Every place req
 
 | Method | Path |
 | --- | --- |
-| GET | /health |
-| POST | /rpc/connect |
-| POST | /rpc/disconnect |
-| GET | /rpc/balance |
-| GET | /rpc/available_balance |
-| GET | /rpc/positions |
-| GET | /rpc/position?symbol= |
-| GET | /rpc/open_orders |
-| GET | /rpc/order/{cloid} |
-| GET | /rpc/fills |
-| POST | /rpc/set_leverage |
-| POST | /rpc/place_order |
-| POST | /rpc/cancel_order |
-| GET | /rpc/market_data?symbol= |
-| GET | /rpc/stream_events |
+| GET | /health | ready, worker_state, execution_enabled, sync_status |
+| POST | /rpc/connect | |
+| POST | /rpc/disconnect | |
+| POST | /rpc/configure | trading_pair / slippage / expected leverage; does not live-set leverage |
+| GET | /rpc/balance | |
+| GET | /rpc/available_balance | |
+| GET | /rpc/positions | |
+| GET | /rpc/position?symbol= | |
+| GET | /rpc/open_orders | |
+| GET | /rpc/order/{cloid} | |
+| GET | /rpc/fills | |
+| POST | /rpc/set_leverage | blocked when EXECUTION_ENABLED=false |
+| POST | /rpc/place_order | |
+| POST | /rpc/cancel_order | |
+| GET | /rpc/market_data?symbol= | |
+| GET | /rpc/stream_events | |
 | POST | /rpc/test/behavior | Mock-only test hook |
+| POST | /rpc/test/query_fail | Mock-only test hook |
+| POST | /rpc/test/ws_disconnect | Test hook |
+| POST | /rpc/test/rest_resync | Test hook |
 
 Adapter helpers `open_long` / `open_short` / `close_position` wrap `place_order` inside the worker. The backend Controller uses `place_order` only so there is a single execution command path.

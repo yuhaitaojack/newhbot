@@ -81,6 +81,13 @@ export function DashboardPage() {
           <p className="text-xs text-zinc-500">mirror source: {status.position.source}</p>
         </Card>
         <Card>
+          <CardTitle>Execution Worker</CardTitle>
+          <p>{status.worker_state ?? "—"}</p>
+          <p className="text-xs text-zinc-500">
+            ready={String(status.worker_ready)} sync={status.sync_status ?? "—"}
+          </p>
+        </Card>
+        <Card>
           <CardTitle>PnL</CardTitle>
           <p>{status.position.unrealized_pnl}</p>
         </Card>

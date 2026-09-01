@@ -8,11 +8,12 @@ Web UI
         Trading Controller   <-- sole trading entry
           Position Guard     <-- pure function on snapshots
             Execution Worker RPC (HTTP)
-              ExecutionAdapter (Mock in PHASE 2)
-                Mock exchange (FLAT / LONG / SHORT)
+              WorkerRuntime (pair gate, READY, DRY_RUN)
+                ExecutionAdapter (Mock | Hyperliquid)
+                  Mock exchange  OR  Fake/Hummingbot Hyperliquid connector
 ```
 
-Future Hyperliquid: replace Mock adapter inside the worker. Do not let Backend import Hummingbot objects.
+Hummingbot objects stay inside the worker. Backend never imports them. Default `EXECUTION_ENABLED=false`.
 
 Future strategy sandbox: `StrategyRuntime.evaluate()` is the reserved process boundary. Do **not** add a strategy Docker service in PHASE 2.
 

@@ -73,7 +73,16 @@ def _settings_out(row) -> SettingsOut:
 async def health() -> HealthOut:
     container = _container()
     worker_ok = await container.execution.health()
-    return HealthOut(status="ok", execution_mode=container.settings.execution_mode, worker_ok=worker_ok)
+    status = await container.execution.worker_status()
+    return HealthOut(
+        status="ok",
+        execution_mode=container.settings.execution_mode,
+        worker_ok=worker_ok,
+        worker_ready=bool(status.get("ready")),
+        worker_state=status.get("worker_state"),
+        execution_enabled=bool(status.get("execution_enabled", False)),
+        sync_status=status.get("sync_status"),
+    )
 
 
 @router.get("/status", response_model=StatusOut)
@@ -109,6 +118,7 @@ async def status(session: AsyncSession = Depends(get_session)) -> StatusOut:
     last_event = await EventRepository(session).max_id()
     last_order = orders[0] if orders else None
     last_fill = fills[0] if fills else None
+    worker = await container.execution.worker_status()
     return StatusOut(
         system_state=settings_row.system_state,  # type: ignore[arg-type]
         trading_enabled=settings_row.trading_enabled,
@@ -128,6 +138,9 @@ async def status(session: AsyncSession = Depends(get_session)) -> StatusOut:
         last_fill=_fill_out(last_fill) if last_fill else None,
         balance={"equity": balance.equity, "available": balance.available, "margin_used": balance.margin_used},
         snapshot_event_id=last_event,
+        worker_ready=bool(worker.get("ready")),
+        worker_state=worker.get("worker_state"),
+        sync_status=worker.get("sync_status"),
     )
 
 

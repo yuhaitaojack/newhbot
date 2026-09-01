@@ -1,7 +1,7 @@
 [project]
 name = "newhbot-execution-worker"
-version = "0.2.0"
-description = "Narrow execution worker. PHASE 2 uses MockExchange only."
+version = "0.3.0"
+description = "Narrow execution worker. Mock default; Hyperliquid adapter is DRY_RUN unless EXECUTION_ENABLED."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",

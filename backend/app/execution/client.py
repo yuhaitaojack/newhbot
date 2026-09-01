@@ -36,6 +36,43 @@ class HttpExecutionClient:
         except httpx.HTTPError:
             return False
 
+    async def is_ready(self) -> bool:
+        try:
+            async with self._client() as client:
+                response = await client.get(f"{self._base_url}/health")
+            if response.status_code != 200:
+                return False
+            payload = response.json()
+            if "ready" in payload:
+                return bool(payload["ready"])
+            return True
+        except httpx.HTTPError:
+            return False
+
+    async def worker_status(self) -> dict:
+        try:
+            async with self._client() as client:
+                response = await client.get(f"{self._base_url}/health")
+            if response.status_code != 200:
+                return {"ready": False, "worker_state": "NOT_READY"}
+            return response.json()
+        except httpx.HTTPError:
+            return {"ready": False, "worker_state": "NOT_READY"}
+
+    async def configure(self, trading_pair: str, slippage, leverage: int) -> None:
+        async with self._client() as client:
+            response = await client.post(
+                f"{self._base_url}/rpc/configure",
+                json={
+                    "trading_pair": trading_pair,
+                    "slippage": str(slippage),
+                    "leverage": leverage,
+                },
+            )
+            if response.status_code == 404:
+                return
+            response.raise_for_status()
+
     async def connect(self) -> None:
         async with self._client() as client:
             response = await client.post(f"{self._base_url}/rpc/connect")

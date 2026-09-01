@@ -11,6 +11,9 @@ services:
     restart: unless-stopped
     environment:
       LOG_LEVEL: INFO
+      EXECUTION_MODE: mock
+      EXECUTION_ENABLED: "false"
+      HUMMINGBOT_VERSION: v2.16.0
     volumes:
       - ./logs:/app/logs
     expose:
@@ -29,6 +32,7 @@ services:
       DATABASE_URL: sqlite+aiosqlite:///./data/newhbot.db
       EXECUTION_WORKER_URL: http://execution-worker:8001
       EXECUTION_MODE: mock
+      EXECUTION_ENABLED: "false"
       CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080
     volumes:
       - ./data:/app/data

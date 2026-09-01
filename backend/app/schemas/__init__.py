@@ -126,6 +126,10 @@ class HealthOut(BaseModel):
     status: str
     execution_mode: str
     worker_ok: bool
+    worker_ready: bool = False
+    worker_state: str | None = None
+    execution_enabled: bool = False
+    sync_status: str | None = None
 
 
 class StatusOut(BaseModel):
@@ -140,3 +144,6 @@ class StatusOut(BaseModel):
     last_fill: FillOut | None
     balance: dict[str, Decimal]
     snapshot_event_id: int
+    worker_ready: bool = False
+    worker_state: str | None = None
+    sync_status: str | None = None

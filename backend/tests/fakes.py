@@ -20,6 +20,7 @@ class FakeExecutionClient:
     def __init__(self) -> None:
         self.connected = False
         self.healthy = True
+        self.ready_flag = True
         self.equity = Decimal("10000")
         self.available = Decimal("10000")
         self.mid = Decimal("100")
@@ -37,6 +38,20 @@ class FakeExecutionClient:
 
     async def health(self) -> bool:
         return self.healthy
+
+    async def is_ready(self) -> bool:
+        return self.healthy and self.ready_flag
+
+    async def worker_status(self) -> dict:
+        return {
+            "ready": self.healthy,
+            "worker_state": "READY" if self.healthy else "NOT_READY",
+            "mode": "fake",
+            "execution_enabled": False,
+        }
+
+    async def configure(self, trading_pair: str, slippage, leverage: int) -> None:
+        _ = (trading_pair, slippage, leverage)
 
     async def connect(self) -> None:
         self.connected = True

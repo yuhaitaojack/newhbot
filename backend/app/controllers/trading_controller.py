@@ -133,6 +133,12 @@ class TradingController:
             await self._recovery.set_state(session, SystemState.CONNECTING, "worker_down")
             return {"ok": False, "reason": "execution worker unreachable"}
         await self._execution.connect()
+        configure = getattr(self._execution, "configure", None)
+        if configure is not None:
+            await configure(settings.trading_pair, settings.slippage, settings.leverage)
+        if not await self._execution.is_ready():
+            await self._recovery.enter_recovery(session, "worker_not_ready")
+            return {"ok": False, "reason": "execution worker not READY"}
         await self._recovery.set_state(session, SystemState.SYNCING, "user_start")
         await self._sync_exchange_mirror(session, settings.trading_pair)
         if await OrderRepository(session).has_unresolved():
@@ -182,10 +188,11 @@ class TradingController:
 
     async def _open(self, session: AsyncSession, signal: SignalType, record: Signal) -> dict:
         settings = await SettingsRepository(session).get()
-        connected = await self._execution.health()
+        reachable = await self._execution.health()
+        ready = await self._execution.is_ready() if reachable else False
         exchange_side = PositionSide.UNKNOWN
         foreign = False
-        if connected:
+        if reachable:
             try:
                 exchange_side = (await self._execution.get_position(settings.trading_pair)).side
                 positions = await self._execution.get_positions()
@@ -193,7 +200,7 @@ class TradingController:
                     item.side != PositionSide.FLAT and item.symbol != settings.trading_pair for item in positions
                 )
             except Exception:
-                connected = False
+                ready = False
         local = await self._local_side(session, settings.trading_pair)
         has_unresolved = await OrderRepository(session).has_unresolved()
         reservation_held = await ReservationRepository(session).current_order_id() is not None
@@ -205,7 +212,7 @@ class TradingController:
                 system_state=SystemState(settings.system_state),
                 configured_pair=settings.trading_pair,
                 target_pair=settings.trading_pair,
-                exchange_connected=connected,
+                exchange_connected=ready,
                 has_foreign_positions=foreign,
                 has_open_reservation=reservation_held,
             )

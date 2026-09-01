@@ -27,4 +27,7 @@ export type Status = {
   last_fill: { cloid: string; price: string; quantity: string } | null;
   balance: { equity: string; available: string; margin_used: string };
   snapshot_event_id: number;
+  worker_ready?: boolean;
+  worker_state?: string | null;
+  sync_status?: string | null;
 };

@@ -185,3 +185,13 @@ def test_lists_and_websocket_hello(app_client) -> None:
     with client.websocket_connect("/ws") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "hello"
+
+
+def test_worker_not_ready_blocks_open(app_client) -> None:
+    client, _, fake = app_client
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+    fake.ready_flag = False
+    blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert blocked.json()["accepted"] is False
+    assert fake.place_calls == 0
