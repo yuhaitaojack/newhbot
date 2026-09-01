@@ -24,8 +24,8 @@ class RecoveryManager:
     async def bootstrap(self, session: AsyncSession) -> SystemState:
         settings = await SettingsRepository(session).get()
         orders = OrderRepository(session)
-        if await orders.has_unknown():
-            return await self._set_state(session, SystemState.RECOVERY, "unknown_orders_on_boot")
+        if await orders.has_unresolved():
+            return await self._set_state(session, SystemState.RECOVERY, "unresolved_orders_on_boot")
         if settings.estop:
             return await self._set_state(session, SystemState.STOPPED, "estop_latched")
         connected = await self._execution.health()

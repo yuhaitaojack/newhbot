@@ -21,6 +21,6 @@ def app_client(fake_execution: FakeExecutionClient):
         execution_mode="mock",
         cors_origins="http://test",
     )
-    app = create_app(settings=settings, execution=fake_execution)
+    app = create_app(settings=settings, execution=fake_execution, bootstrap_schema=True)
     with TestClient(app) as client:
         yield client, app, fake_execution

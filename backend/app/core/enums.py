@@ -18,13 +18,45 @@ class PositionSide(StrEnum):
 
 
 class OrderStatus(StrEnum):
+    """Local order lifecycle. UNKNOWN is not a pre-send state.
+
+    PENDING_SUBMISSION: intent persisted; place_order has not been attempted.
+    SUBMITTING: place_order is in flight.
+    ACK/OPEN/PARTIAL/FILLED/REJECTED/CANCELED: exchange (or mock) result confirmed.
+    UNKNOWN: execution was attempted and the final result cannot be confirmed.
+    """
+
     PENDING_SUBMISSION = "PENDING_SUBMISSION"
-    UNKNOWN = "UNKNOWN"
+    SUBMITTING = "SUBMITTING"
+    ACK = "ACK"
     OPEN = "OPEN"
     PARTIAL = "PARTIAL"
     FILLED = "FILLED"
     REJECTED = "REJECTED"
     CANCELED = "CANCELED"
+    UNKNOWN = "UNKNOWN"
+
+
+# Crash/timeout/pre-ack: must not auto-resubmit. PENDING is pre-send but still blocks.
+UNRESOLVED_ORDER_STATUSES = frozenset(
+    {OrderStatus.PENDING_SUBMISSION, OrderStatus.SUBMITTING, OrderStatus.UNKNOWN}
+)
+
+# At most one inflight opening order per symbol (DB partial unique index).
+INFLIGHT_OPEN_STATUSES = frozenset(
+    {
+        OrderStatus.PENDING_SUBMISSION,
+        OrderStatus.SUBMITTING,
+        OrderStatus.ACK,
+        OrderStatus.OPEN,
+        OrderStatus.PARTIAL,
+        OrderStatus.UNKNOWN,
+    }
+)
+
+CONFIRMED_LIVE_STATUSES = frozenset(
+    {OrderStatus.ACK, OrderStatus.OPEN, OrderStatus.PARTIAL, OrderStatus.FILLED}
+)
 
 
 class OrderType(StrEnum):

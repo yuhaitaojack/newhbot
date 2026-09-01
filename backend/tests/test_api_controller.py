@@ -70,11 +70,13 @@ def test_unknown_blocks_new_open(app_client) -> None:
     client, _, fake = app_client
     client.post("/api/trading/start")
     fake.place_mode = "network_before_accept"
+    fake.get_order_error = True
     unknown = client.post("/api/trading/signal", json={"signal": "LONG"})
     assert unknown.json()["status"] == OrderStatus.UNKNOWN.value
     orders = client.get("/api/orders")
     assert orders.json()[0]["status"] == OrderStatus.UNKNOWN.value
     fake.place_mode = "fill"
+    fake.get_order_error = False
     blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
     assert blocked.json()["accepted"] is False
     assert fake.place_calls == 1
@@ -87,20 +89,26 @@ def test_timeout_after_accept_does_not_resubmit(app_client) -> None:
     result = client.post("/api/trading/signal", json={"signal": "LONG"})
     body = result.json()
     assert "cloid" in body
+    assert body["status"] == OrderStatus.OPEN.value
     orders = client.get("/api/orders")
     assert len(orders.json()) == 1
+    assert orders.json()[0]["status"] == OrderStatus.OPEN.value
+    assert fake.place_calls == 1
 
 
 def test_recovery_blocks_open(app_client) -> None:
     client, _, fake = app_client
     client.post("/api/trading/start")
     fake.place_mode = "network_before_accept"
+    fake.get_order_error = True
     client.post("/api/trading/signal", json={"signal": "LONG"})
     status = client.get("/api/status")
     assert status.json()["system_state"] == "RECOVERY"
     fake.place_mode = "fill"
+    fake.get_order_error = False
     blocked = client.post("/api/trading/signal", json={"signal": "SHORT"})
     assert blocked.json()["accepted"] is False
+    assert fake.place_calls == 1
 
 
 def test_short_then_short_rejected(app_client) -> None:
@@ -127,12 +135,12 @@ def test_settings_survive_app_restart(tmp_path) -> None:
         cors_origins="http://test",
     )
     fake = FakeExecutionClient()
-    app1 = create_app(settings=settings, execution=fake)
+    app1 = create_app(settings=settings, execution=fake, bootstrap_schema=True)
     with TestClient(app1) as client:
         updated = client.put("/api/settings", json={"leverage": 7, "trading_pair": "ETH-USD"})
         assert updated.status_code == 200
         assert updated.json()["leverage"] == 7
-    app2 = create_app(settings=settings, execution=fake)
+    app2 = create_app(settings=settings, execution=fake, bootstrap_schema=False)
     with TestClient(app2) as client:
         again = client.get("/api/settings")
         assert again.status_code == 200
@@ -142,16 +150,30 @@ def test_settings_survive_app_restart(tmp_path) -> None:
 
 def test_control_buttons(app_client) -> None:
     client, _, _ = app_client
-    assert client.post("/api/trading/start").json()["ok"] is True
-    assert client.post("/api/trading/stop").json()["ok"] is True
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+    assert start.json()["state"] == "RUNNING"
+    stop = client.post("/api/trading/stop")
+    assert stop.json()["ok"] is True
+    assert stop.json()["state"] == "STOPPED"
     client.post("/api/trading/start")
-    client.post("/api/trading/signal", json={"signal": "LONG"})
+    opened = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert opened.json()["accepted"] is True
     closed = client.post("/api/trading/close-and-continue")
     assert closed.status_code == 200
+    assert closed.json()["ok"] is True
+    assert client.get("/api/positions").json()[0]["side"] == PositionSide.FLAT.value
+    status_after_close = client.get("/api/status").json()
+    assert status_after_close["system_state"] == "RUNNING"
+    assert status_after_close["trading_enabled"] is True
+    client.post("/api/trading/signal", json={"signal": "LONG"})
     estop = client.post("/api/trading/emergency-stop")
     assert estop.status_code == 200
-    status = client.get("/api/status")
-    assert status.json()["estop"] is True
+    status = client.get("/api/status").json()
+    assert status["estop"] is True
+    assert status["trading_enabled"] is False
+    assert status["system_state"] == "STOPPED"
+    assert status["position"]["side"] == PositionSide.FLAT.value
 
 
 def test_lists_and_websocket_hello(app_client) -> None:

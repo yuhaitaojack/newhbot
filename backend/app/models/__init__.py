@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -71,11 +71,26 @@ class Signal(Base):
 
 
 class Order(Base):
+    """One intent -> one cloid -> one order row. cloid/intent_id/request_id are UNIQUE in SQLite."""
+
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("uq_orders_intent_id", "intent_id", unique=True),
+        Index("uq_orders_request_id", "request_id", unique=True),
+        Index(
+            "uq_orders_inflight_open_per_symbol",
+            "symbol",
+            unique=True,
+            sqlite_where=text(
+                "reduce_only = 0 AND status IN "
+                "('PENDING_SUBMISSION','SUBMITTING','ACK','OPEN','PARTIAL','UNKNOWN')"
+            ),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    intent_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    request_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    intent_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
     cloid: Mapped[str] = mapped_column(String(66), nullable=False, unique=True, index=True)
     exchange_oid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -157,6 +172,24 @@ class SystemEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OpenReservation(Base):
+    """Singleton open-intent slot (id=1).
+
+    Compare-and-set: UPDATE ... SET order_id=? WHERE id=1 AND order_id IS NULL.
+    This is the concurrency lock. A process-local bool cannot serialize two API workers.
+    Held from first opening intent until close-to-FLAT or proven-unsubmitted.
+    """
+
+    __tablename__ = "open_reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True)
+    held_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class AuditLog(Base):

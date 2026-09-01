@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.controllers.position_guard import GuardInput, PositionGuard
 from app.core.enums import (
+    CONFIRMED_LIVE_STATUSES,
+    UNRESOLVED_ORDER_STATUSES,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -27,6 +29,7 @@ from app.repositories import (
     FillRepository,
     OrderRepository,
     PositionRepository,
+    ReservationRepository,
     SettingsRepository,
     SignalRepository,
     SnapshotRepository,
@@ -34,8 +37,6 @@ from app.repositories import (
 )
 
 logger = logging.getLogger(__name__)
-
-UNKNOWN_BLOCKING = {OrderStatus.UNKNOWN, OrderStatus.PENDING_SUBMISSION}
 
 
 class TradingController:
@@ -102,7 +103,7 @@ class TradingController:
         await self._execution.connect()
         await self._recovery.set_state(session, SystemState.SYNCING, "user_start")
         await self._sync_exchange_mirror(session, settings.trading_pair)
-        if await OrderRepository(session).has_unknown():
+        if await OrderRepository(session).has_unresolved():
             await self._recovery.enter_recovery(session, "unknown_order")
             return {"ok": False, "reason": "unknown orders present"}
         await self._recovery.set_state(session, SystemState.RUNNING, "user_start")
@@ -162,17 +163,19 @@ class TradingController:
             except Exception:
                 connected = False
         local = await self._local_side(session, settings.trading_pair)
-        has_unknown = await OrderRepository(session).has_unknown()
+        has_unresolved = await OrderRepository(session).has_unresolved()
+        reservation_held = await ReservationRepository(session).current_order_id() is not None
         guard = self._guard.can_open_position(
             GuardInput(
                 local_side=local,
                 exchange_side=exchange_side,
-                has_unknown_orders=has_unknown,
+                has_unknown_orders=has_unresolved,
                 system_state=SystemState(settings.system_state),
                 configured_pair=settings.trading_pair,
                 target_pair=settings.trading_pair,
                 exchange_connected=connected,
                 has_foreign_positions=foreign,
+                has_open_reservation=reservation_held,
             )
         )
         if not guard.allowed:
@@ -183,6 +186,13 @@ class TradingController:
 
         side = OrderSide.BUY if signal == SignalType.LONG else OrderSide.SELL
         quantity = await self._size_from_settings(session)
+        order_id = new_id()
+        reserved = await ReservationRepository(session).try_acquire(order_id, reason="open")
+        if not reserved:
+            record.reason = "open reservation held; concurrent or in-flight open exists"
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+
         order = await self._submit(
             session,
             symbol=settings.trading_pair,
@@ -190,12 +200,9 @@ class TradingController:
             quantity=quantity,
             reduce_only=False,
             signal_id=record.id,
+            order_id=order_id,
         )
-        record.accepted = str(order.status) in {
-            OrderStatus.FILLED.value,
-            OrderStatus.OPEN.value,
-            OrderStatus.PARTIAL.value,
-        }
+        record.accepted = str(order.status) in {item.value for item in CONFIRMED_LIVE_STATUSES}
         record.reason = str(order.status)
         await session.commit()
         return {
@@ -228,6 +235,7 @@ class TradingController:
 
         if exchange.side == PositionSide.FLAT:
             settings.close_intent = None
+            await ReservationRepository(session).release()
             if stop_after:
                 settings.trading_enabled = False
                 await self._recovery.set_state(session, SystemState.STOPPED, "close_already_flat")
@@ -253,6 +261,9 @@ class TradingController:
 
         await self._sync_exchange_mirror(session, settings.trading_pair)
         settings.close_intent = None
+        live = await self._execution.get_position(settings.trading_pair)
+        if live.side == PositionSide.FLAT:
+            await ReservationRepository(session).release()
         if stop_after:
             settings.trading_enabled = False
             state = SystemState.STOPPED if not emergency else SystemState.STOPPED
@@ -272,13 +283,14 @@ class TradingController:
         quantity: Decimal,
         reduce_only: bool,
         signal_id: str | None,
+        order_id: str | None = None,
     ) -> Order:
         settings = await SettingsRepository(session).get()
         request_id = new_id()
         intent_id = new_id()
         cloid = new_cloid()
         order = Order(
-            id=new_id(),
+            id=order_id or new_id(),
             intent_id=intent_id,
             request_id=request_id,
             cloid=cloid,
@@ -292,10 +304,15 @@ class TradingController:
         )
         await OrderRepository(session).add(order)
         await session.commit()
-        order.status = OrderStatus.UNKNOWN.value
+        logger.info(
+            "order intent persisted as PENDING_SUBMISSION",
+            extra=log_extra(request_id=request_id, order_id=order.id, cloid=cloid, symbol=symbol, side=side.value),
+        )
+
+        order.status = OrderStatus.SUBMITTING.value
         await session.commit()
         logger.info(
-            "order intent persisted",
+            "order SUBMITTING; calling execution worker once",
             extra=log_extra(request_id=request_id, order_id=order.id, cloid=cloid, symbol=symbol, side=side.value),
         )
 
@@ -312,9 +329,10 @@ class TradingController:
             response = await self._execution.place_order(request)
         except Exception as exc:
             logger.warning(
-                "place_order raised; will query cloid and will not resubmit",
+                "place_order raised; marking UNKNOWN and querying; will not resubmit",
                 extra=log_extra(request_id=request_id, cloid=cloid, symbol=symbol, side=side.value),
             )
+            order.status = OrderStatus.UNKNOWN.value
             order.error_message = str(exc)
             await session.commit()
             await self._reconcile_unknown(session, order)
@@ -326,30 +344,103 @@ class TradingController:
         await session.commit()
         if response.status in {OrderStatus.FILLED, OrderStatus.PARTIAL} and response.filled_quantity > 0:
             await self._record_fill(session, order, response.avg_price or Decimal("0"), response.filled_quantity)
+        if str(order.status) == OrderStatus.REJECTED.value and not reduce_only:
+            await ReservationRepository(session).release(order.id)
         await self._sync_exchange_mirror(session, symbol)
         await self._emit(session, "order", {"cloid": cloid, "status": order.status})
         return order
 
     async def _reconcile_unknown(self, session: AsyncSession, order: Order) -> None:
-        """Never places a second order. Query only."""
+        """Query-only. Never calls place_order. Absence of an open order is not enough."""
+        order_ok = True
+        viewed = None
         try:
             viewed = await self._execution.get_order(order.cloid)
-        except Exception:
-            viewed = None
-        if viewed is None:
+        except Exception as exc:
+            order_ok = False
+            order.error_message = f"get_order failed: {exc}"
+
+        fills_ok = True
+        matching_fills = []
+        try:
+            fills = await self._execution.get_fills()
+            matching_fills = [item for item in fills if item.cloid == order.cloid]
+        except Exception as exc:
+            fills_ok = False
+            order.error_message = f"get_fills failed: {exc}"
+
+        position_ok = True
+        position = None
+        try:
+            position = await self._execution.get_position(order.symbol)
+        except Exception as exc:
+            position_ok = False
+            order.error_message = f"get_position failed: {exc}"
+
+        if not (order_ok and fills_ok and position_ok):
             order.status = OrderStatus.UNKNOWN.value
             await self._recovery.enter_recovery(session, "unconfirmed_place")
             logger.error(
-                "order remains UNKNOWN; cannot prove it was not executed",
+                "order remains UNKNOWN; order/fills/position not all queryable",
                 extra=log_extra(request_id=order.request_id, cloid=order.cloid, order_id=order.id),
             )
             await session.commit()
             await self._emit(session, "order", {"cloid": order.cloid, "status": OrderStatus.UNKNOWN.value})
             return
-        order.status = viewed.status.value
-        order.exchange_oid = viewed.exchange_oid
+
+        if viewed is not None:
+            order.status = viewed.status.value
+            order.exchange_oid = viewed.exchange_oid
+            if matching_fills and str(order.status) in {OrderStatus.FILLED.value, OrderStatus.PARTIAL.value}:
+                for fill in matching_fills:
+                    await self._record_fill(session, order, fill.price, fill.quantity)
+            await session.commit()
+            await self._sync_exchange_mirror(session, order.symbol)
+            await self._maybe_leave_recovery(session)
+            await self._emit(session, "order", {"cloid": order.cloid, "status": order.status})
+            return
+
+        if matching_fills:
+            order.status = OrderStatus.UNKNOWN.value
+            order.error_message = "fills exist without get_order hit; cannot treat as unsubmitted"
+            await self._recovery.enter_recovery(session, "fill_without_order")
+            await session.commit()
+            return
+
+        if position is not None and not order.reduce_only and position.side != PositionSide.FLAT:
+            order.status = OrderStatus.UNKNOWN.value
+            order.error_message = "position is not FLAT without a matching order; cannot treat as unsubmitted"
+            await self._recovery.enter_recovery(session, "position_without_order")
+            await session.commit()
+            return
+
+        if order.reduce_only and position is not None and position.side != PositionSide.FLAT:
+            order.status = OrderStatus.UNKNOWN.value
+            order.error_message = "close unconfirmed: no order/fill and position still open"
+            await self._recovery.enter_recovery(session, "unconfirmed_close")
+            await session.commit()
+            return
+
+        order.status = OrderStatus.REJECTED.value
+        order.error_message = "confirmed absent: no order, no fill, position compatible with unsubmitted"
+        if not order.reduce_only:
+            await ReservationRepository(session).release(order.id)
         await session.commit()
-        await self._sync_exchange_mirror(session, order.symbol)
+        await self._maybe_leave_recovery(session)
+        logger.warning(
+            "UNKNOWN cleared to REJECTED after order+fills+position confirmed absent",
+            extra=log_extra(request_id=order.request_id, cloid=order.cloid, order_id=order.id),
+        )
+        await self._emit(session, "order", {"cloid": order.cloid, "status": order.status})
+
+    async def _maybe_leave_recovery(self, session: AsyncSession) -> None:
+        if await OrderRepository(session).has_unresolved():
+            return
+        settings = await SettingsRepository(session).get()
+        if settings.system_state != SystemState.RECOVERY.value or settings.estop:
+            return
+        nxt = SystemState.RUNNING if settings.trading_enabled else SystemState.STOPPED
+        await self._recovery.set_state(session, nxt, "unresolved_orders_cleared")
 
     async def _record_fill(self, session: AsyncSession, order: Order, price: Decimal, quantity: Decimal) -> None:
         fill = Fill(

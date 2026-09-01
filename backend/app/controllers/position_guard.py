@@ -17,6 +17,7 @@ class GuardInput:
     target_pair: str
     exchange_connected: bool
     has_foreign_positions: bool = False
+    has_open_reservation: bool = False
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class PositionGuard:
             return GuardResult(False, "account has a position on a non-configured pair")
         if inp.has_unknown_orders:
             return GuardResult(False, "unknown order exists; new opens are forbidden")
+        if inp.has_open_reservation:
+            return GuardResult(False, "open reservation held; new opens are forbidden")
         if inp.system_state == SystemState.RECOVERY:
             return GuardResult(False, "recovery forbids new opens")
         if inp.system_state != SystemState.RUNNING:

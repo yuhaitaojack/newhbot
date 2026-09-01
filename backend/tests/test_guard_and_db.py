@@ -35,8 +35,14 @@ def test_alembic_upgrade_creates_tables(tmp_path, monkeypatch) -> None:
         "account_snapshots",
         "system_events",
         "audit_logs",
+        "open_reservations",
     ):
         assert name in tables
+    indexes = {item["name"] for item in inspector.get_indexes("orders")}
+    assert "ix_orders_cloid" in indexes
+    assert "uq_orders_intent_id" in indexes
+    assert "uq_orders_request_id" in indexes
+    assert "uq_orders_inflight_open_per_symbol" in indexes
 
 
 def test_effective_parameter_uses_default_when_disabled() -> None:

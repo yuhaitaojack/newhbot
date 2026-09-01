@@ -9,8 +9,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _docker_executable() -> str | None:
+    found = shutil.which("docker")
+    if found:
+        return found
+    user_install = Path.home() / "AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe"
+    if user_install.is_file():
+        return str(user_install)
+    return None
+
+
 def test_docker_compose_config() -> None:
-    docker = shutil.which("docker")
+    docker = _docker_executable()
     if docker is None:
         pytest.skip("BLOCKED: Docker未安装")
     result = subprocess.run(
@@ -21,11 +31,7 @@ def test_docker_compose_config() -> None:
         check=False,
     )
     combined = (result.stdout or "") + (result.stderr or "")
-    if result.returncode != 0 and (
-        "not recognized" in combined.lower()
-        or "cannot find" in combined.lower()
-        or "is not running" in combined.lower()
-        or "docker desktop" in combined.lower()
-    ):
-        pytest.skip("BLOCKED: Docker未安装")
     assert result.returncode == 0, combined
+    assert "backend:" in combined
+    assert "execution-worker:" in combined
+    assert "frontend:" in combined

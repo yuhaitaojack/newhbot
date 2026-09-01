@@ -1,48 +1,52 @@
 # Database design
 
-SQLite file: `data/newhbot.db` (WAL, `PRAGMA synchronous=FULL`, foreign keys on).
+SQLite file: `data/newhbot.db` (WAL, `PRAGMA synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`).
 
 **Exchange State > Local DB.** SQLite is the audit/control-plane store. It is not Hyperliquid (or Mock exchange) truth. The `positions` table is a **mirror/audit copy**. Recovery and Position Guard must query the execution adapter; they may compare the mirror, but they must not overwrite exchange state from SQLite.
 
-Alembic revision: `0001_initial` (`backend/migrations/`). Application boot also runs `create_all` so tests can use in-memory SQLite. Docker backend image runs `alembic upgrade head` before uvicorn.
+Alembic revisions:
+
+- `0001_initial` — core tables
+- `0002_order_constraints` — unique `intent_id` / `request_id`, partial unique inflight-open index, `open_reservations`
+
+**Production schema path:** `alembic upgrade head` then application startup. Lifespan does **not** call `Base.metadata.create_all()`. Tests may pass `create_app(..., bootstrap_schema=True)` which uses `create_all_for_tests()`.
 
 ## Tables
 
 | Table | Role |
 | --- | --- |
-| settings | Single-row (`id=1`) trading settings. Survives process restart and container recreate **if** `./data` is bind-mounted. |
+| settings | Single-row (`id=1`) trading settings |
 | strategy_versions | Uploaded/registered strategy files |
 | strategy_parameters | Per-version parameters |
 | signals | LONG/SHORT/CLOSE/HOLD audit |
-| orders | Intent + `request_id` + `cloid` + status including UNKNOWN / PENDING_SUBMISSION |
+| orders | One intent → one `cloid` → one row. UNIQUE: `cloid`, `intent_id`, `request_id` |
 | fills | Fill records |
 | trades | Round-trip summaries |
-| positions | Local mirror only (`source` = `local_mirror` or `exchange_mirror`) |
+| positions | Local mirror only |
 | account_snapshots | Equity snapshots |
 | system_events | Event log for UI snapshot + WS |
-| audit_logs | User/system actions (settings, start/stop, ignored reverse) |
+| audit_logs | User/system actions |
+| open_reservations | Singleton CAS slot (`id=1`) for in-flight opens |
 
-## Settings row
+## Order status
 
-`trading_pair`, `leverage`, `position_percentage`, `order_type`, `limit_timeout`, `slippage`, `active_strategy`, `active_strategy_version`, `trading_enabled`, plus control flags `estop`, `close_intent`, `system_state`.
+| Status | Meaning |
+| --- | --- |
+| PENDING_SUBMISSION | Intent persisted. `place_order` has **not** been attempted. |
+| SUBMITTING | `place_order` is in flight. |
+| ACK / OPEN / PARTIAL / FILLED / REJECTED / CANCELED | Confirmed result. |
+| UNKNOWN | Execution **was attempted** and the final result cannot be confirmed. |
 
-These live in SQLite, not frontend localStorage, not process memory as the source of truth, and not `.env`. `.env` is infrastructure only (`DATABASE_URL`, `EXECUTION_WORKER_URL`, log level, CORS).
+UNKNOWN is cleared to REJECTED only when **all three** confirm absence: `get_order(cloid)` missing, no fill for that cloid, and position compatible with unsubmitted. Missing open orders alone is not enough.
 
-## Strategy parameters
+## Open concurrency
 
-Each row: `name`, `type`, `default_value`, `current_value`, `enabled`, `min_value`, `max_value`, `description`.
+Two overlapping LONG signals must not both `place_order`. The lock is SQLite compare-and-set:
 
-- `enabled=false` → effective value = `default_value`
-- `enabled=true` → effective value = `current_value`
+`UPDATE open_reservations SET order_id=? WHERE id=1 AND order_id IS NULL`
 
-PHASE 2 exposes read APIs. Writes that change parameters must go through an audited path (settings updates already write `audit_logs`).
+plus a partial unique index: at most one non-reduce-only row per symbol in inflight statuses. Not a process-local bool.
 
-## Orders and UNKNOWN
+## Settings
 
-An order row is inserted **before** the execution RPC:
-
-1. `PENDING_SUBMISSION` (intent persisted)
-2. `UNKNOWN` immediately before `place_order`
-3. Update from worker response, or stay UNKNOWN after `get_order(cloid)` if the RPC raised and the order cannot be proven absent-and-unexecuted
-
-`cloid` is unique. Retries must not mint a new cloid.
+Trading knobs live in SQLite, not frontend localStorage, not `.env`. `.env` is infrastructure only.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from app.core.enums import OrderStatus, PositionSide
@@ -27,6 +28,11 @@ class FakeExecutionClient:
         self.fills: list[FillView] = []
         self.place_mode = "fill"
         self.place_calls = 0
+        self.place_delay = 0.0
+        self.get_order_error = False
+        self.get_fills_error = False
+        self.get_position_error = False
+        self.inject_fill_on_network_fail = False
         self._oid = 1
 
     async def health(self) -> bool:
@@ -45,6 +51,8 @@ class FakeExecutionClient:
         return [item for item in self.positions.values() if item.side != PositionSide.FLAT]
 
     async def get_position(self, symbol: str) -> PositionView:
+        if self.get_position_error:
+            raise TimeoutError("fake get_position failed")
         return self.positions.get(
             symbol, PositionView(symbol=symbol, side=PositionSide.FLAT, size=Decimal("0"))
         )
@@ -56,9 +64,13 @@ class FakeExecutionClient:
         return [item for item in rows if item.status in {OrderStatus.OPEN, OrderStatus.PARTIAL}]
 
     async def get_order(self, cloid: str) -> OrderView | None:
+        if self.get_order_error:
+            raise TimeoutError("fake get_order failed")
         return self.orders.get(cloid)
 
     async def get_fills(self) -> list[FillView]:
+        if self.get_fills_error:
+            raise TimeoutError("fake get_fills failed")
         return list(self.fills)
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -70,7 +82,19 @@ class FakeExecutionClient:
 
     async def place_order(self, request: PlaceOrderRequest) -> PlaceOrderResponse:
         self.place_calls += 1
+        if self.place_delay:
+            await asyncio.sleep(self.place_delay)
         if self.place_mode == "network_before_accept":
+            if self.inject_fill_on_network_fail:
+                self.fills.append(
+                    FillView(
+                        cloid=request.cloid,
+                        symbol=request.symbol,
+                        side=request.side,
+                        price=self.mid,
+                        quantity=request.quantity,
+                    )
+                )
             raise TimeoutError("fake network before accept")
         oid = str(self._oid)
         self._oid += 1

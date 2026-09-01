@@ -32,10 +32,12 @@ def create_engine(settings: Settings, *, echo: bool = False) -> AsyncEngine:
     _ensure_sqlite_dir(settings.database_url)
     connect_args: dict[str, object] = {}
     engine_kwargs: dict[str, object] = {"echo": echo, "future": True}
-    if settings.database_url.endswith(":memory:"):
+    if "sqlite" in settings.database_url:
+        connect_args["timeout"] = 30
         connect_args["check_same_thread"] = False
-        engine_kwargs["poolclass"] = StaticPool
         engine_kwargs["connect_args"] = connect_args
+    if settings.database_url.endswith(":memory:"):
+        engine_kwargs["poolclass"] = StaticPool
     return create_async_engine(settings.database_url, **engine_kwargs)
 
 
@@ -51,6 +53,13 @@ async def configure_sqlite_pragma(engine: AsyncEngine) -> None:
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.exec_driver_sql("PRAGMA synchronous=FULL")
         await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+        await conn.exec_driver_sql("PRAGMA busy_timeout=5000")
+
+
+async def create_all_for_tests(engine: AsyncEngine) -> None:
+    """Test-only schema bootstrap. Production uses Alembic upgrade head."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def session_scope(

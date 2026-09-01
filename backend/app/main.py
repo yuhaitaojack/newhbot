@@ -12,14 +12,14 @@ from app.controllers.position_guard import PositionGuard
 from app.controllers.trading_controller import TradingController
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
-from app.db import Base, configure_sqlite_pragma, create_engine, create_session_factory
+from app.db import configure_sqlite_pragma, create_all_for_tests, create_engine, create_session_factory
 from app.deps import AppContainer
 from app.events.hub import EventHub
 from app.execution.client import HttpExecutionClient
 from app.execution.protocol import ExecutionClient
 from app.models import SettingsRow  # noqa: F401
 from app.recovery.manager import RecoveryManager
-from app.repositories import SettingsRepository, StrategyRepository
+from app.repositories import ReservationRepository, SettingsRepository, StrategyRepository
 from app.models import StrategyParameter, StrategyVersion
 
 _CONTAINER: AppContainer | None = None
@@ -60,6 +60,7 @@ async def seed_defaults(container: AppContainer) -> None:
             )
             settings.active_strategy = "example_hold"
             settings.active_strategy_version = "1"
+        await ReservationRepository(session).ensure_slot()
         await session.commit()
         await container.recovery.bootstrap(session)
 
@@ -68,6 +69,7 @@ def create_app(
     *,
     settings: Settings | None = None,
     execution: ExecutionClient | None = None,
+    bootstrap_schema: bool = False,
 ) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
@@ -94,8 +96,10 @@ def create_app(
         global _CONTAINER
         _CONTAINER = container
         await configure_sqlite_pragma(engine)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # Production: Alembic upgrade head runs before uvicorn (Docker CMD).
+        # Tests may pass bootstrap_schema=True to use create_all_for_tests.
+        if bootstrap_schema:
+            await create_all_for_tests(engine)
         await seed_defaults(container)
         yield
         await engine.dispose()

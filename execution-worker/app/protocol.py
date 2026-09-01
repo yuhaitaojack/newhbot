@@ -18,12 +18,14 @@ class PositionSide(StrEnum):
 
 class OrderStatus(StrEnum):
     PENDING_SUBMISSION = "PENDING_SUBMISSION"
-    UNKNOWN = "UNKNOWN"
+    SUBMITTING = "SUBMITTING"
+    ACK = "ACK"
     OPEN = "OPEN"
     PARTIAL = "PARTIAL"
     FILLED = "FILLED"
     REJECTED = "REJECTED"
     CANCELED = "CANCELED"
+    UNKNOWN = "UNKNOWN"
 
 
 class OrderType(StrEnum):

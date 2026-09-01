@@ -3,14 +3,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import OrderStatus, PositionSide
+from app.core.enums import UNRESOLVED_ORDER_STATUSES, OrderStatus, PositionSide
 from app.models import (
     AccountSnapshot,
     AuditLog,
     Fill,
+    OpenReservation,
     Order,
     Position,
     SettingsRow,
@@ -57,8 +58,13 @@ class OrderRepository:
         return result.scalars().all()
 
     async def has_unknown(self) -> bool:
+        return await self.has_unresolved()
+
+    async def has_unresolved(self) -> bool:
         result = await self._session.execute(
-            select(Order.id).where(Order.status.in_([OrderStatus.UNKNOWN, OrderStatus.PENDING_SUBMISSION])).limit(1)
+            select(Order.id)
+            .where(Order.status.in_([item.value for item in UNRESOLVED_ORDER_STATUSES]))
+            .limit(1)
         )
         return result.scalar_one_or_none() is not None
 
@@ -216,6 +222,44 @@ class StrategyRepository:
 
     async def get_parameter(self, param_id: int) -> StrategyParameter | None:
         return await self._session.get(StrategyParameter, param_id)
+
+
+class ReservationRepository:
+    """Singleton CAS lock for opening intents. Not a Python bool."""
+
+    SLOT_ID = 1
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def ensure_slot(self) -> OpenReservation:
+        row = await self._session.get(OpenReservation, self.SLOT_ID)
+        if row is None:
+            row = OpenReservation(id=self.SLOT_ID, order_id=None)
+            self._session.add(row)
+            await self._session.flush()
+        return row
+
+    async def try_acquire(self, order_id: str, reason: str = "open") -> bool:
+        await self.ensure_slot()
+        result = await self._session.execute(
+            update(OpenReservation)
+            .where(OpenReservation.id == self.SLOT_ID, OpenReservation.order_id.is_(None))
+            .values(order_id=order_id, held_reason=reason)
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def release(self, order_id: str | None = None) -> None:
+        stmt = update(OpenReservation).where(OpenReservation.id == self.SLOT_ID)
+        if order_id is not None:
+            stmt = stmt.where(OpenReservation.order_id == order_id)
+        await self._session.execute(stmt.values(order_id=None, held_reason=None))
+        await self._session.flush()
+
+    async def current_order_id(self) -> str | None:
+        row = await self.ensure_slot()
+        return row.order_id
 
 
 class SnapshotRepository:
