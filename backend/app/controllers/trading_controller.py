@@ -90,10 +90,42 @@ class TradingController:
             return result
         return await self._close_position(session, record, stop_after=False)
 
+    async def reconcile_after_restart(self, session: AsyncSession) -> dict:
+        """Crash recovery. Query-only. Never calls place_order."""
+        orders = await OrderRepository(session).list_unresolved()
+        for order in orders:
+            if str(order.status) == OrderStatus.SUBMITTING.value:
+                order.status = OrderStatus.UNKNOWN.value
+                prior = order.error_message or ""
+                order.error_message = (prior + "; " if prior else "") + "crash while SUBMITTING; will not resubmit"
+                await session.commit()
+                logger.error(
+                    "SUBMITTING promoted to UNKNOWN on restart; will not resubmit",
+                    extra=log_extra(
+                        request_id=order.request_id,
+                        order_id=order.id,
+                        cloid=order.cloid,
+                        symbol=order.symbol,
+                        side=order.side,
+                    ),
+                )
+            await self._reconcile_unknown(session, order)
+        remaining = await OrderRepository(session).has_unresolved()
+        reserved = await ReservationRepository(session).current_order_id()
+        return {
+            "reconciled": len(orders),
+            "still_unresolved": remaining,
+            "reservation_held": reserved is not None,
+        }
+
     async def start(self, session: AsyncSession) -> dict:
         settings = await SettingsRepository(session).get()
         if settings.estop:
             return {"ok": False, "reason": "emergency stop is latched; clear estop before start"}
+        await self.reconcile_after_restart(session)
+        if await OrderRepository(session).has_unresolved():
+            await self._recovery.enter_recovery(session, "unresolved_orders")
+            return {"ok": False, "reason": "unresolved orders present; new opens forbidden"}
         settings.trading_enabled = True
         await self._recovery.set_state(session, SystemState.STARTING, "user_start")
         connected = await self._execution.health()
@@ -104,8 +136,8 @@ class TradingController:
         await self._recovery.set_state(session, SystemState.SYNCING, "user_start")
         await self._sync_exchange_mirror(session, settings.trading_pair)
         if await OrderRepository(session).has_unresolved():
-            await self._recovery.enter_recovery(session, "unknown_order")
-            return {"ok": False, "reason": "unknown orders present"}
+            await self._recovery.enter_recovery(session, "unresolved_orders")
+            return {"ok": False, "reason": "unresolved orders present; new opens forbidden"}
         await self._recovery.set_state(session, SystemState.RUNNING, "user_start")
         await AuditRepository(session).add("start", "{}", actor="user")
         await session.commit()

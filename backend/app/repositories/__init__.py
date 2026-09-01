@@ -68,6 +68,14 @@ class OrderRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def list_unresolved(self) -> Sequence[Order]:
+        result = await self._session.execute(
+            select(Order)
+            .where(Order.status.in_([item.value for item in UNRESOLVED_ORDER_STATUSES]))
+            .order_by(Order.created_at.asc())
+        )
+        return result.scalars().all()
+
     async def list_open(self) -> Sequence[Order]:
         result = await self._session.execute(
             select(Order).where(Order.status.in_([OrderStatus.OPEN, OrderStatus.PARTIAL]))

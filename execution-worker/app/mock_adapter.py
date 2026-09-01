@@ -40,10 +40,18 @@ class MockExecutionAdapter:
         self.orders: dict[str, OrderView] = {}
         self.fills: list[FillView] = []
         self.behavior = PlaceBehavior.FILL
+        self.query_fail = False
         self._oid = 1
 
     def set_behavior(self, behavior: str) -> None:
         self.behavior = PlaceBehavior(behavior)
+
+    def set_query_fail(self, enabled: bool) -> None:
+        self.query_fail = enabled
+
+    def _raise_if_query_fail(self) -> None:
+        if self.query_fail:
+            raise TimeoutError("mock query fail")
 
     def force_position(self, symbol: str, side: PositionSide, size: Decimal, entry: Decimal | None = None) -> None:
         self.positions[symbol] = PositionView(
@@ -82,9 +90,11 @@ class MockExecutionAdapter:
         return rows
 
     async def get_order(self, cloid: str) -> OrderView | None:
+        self._raise_if_query_fail()
         return self.orders.get(cloid)
 
     async def get_fills(self) -> list[FillView]:
+        self._raise_if_query_fail()
         return list(self.fills)
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:

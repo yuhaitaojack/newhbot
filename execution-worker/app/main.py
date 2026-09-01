@@ -47,17 +47,26 @@ async def rpc_disconnect() -> dict:
 
 @app.get("/rpc/balance")
 async def rpc_balance() -> dict:
-    return (await adapter.get_balance()).model_dump(mode="json")
+    try:
+        return (await adapter.get_balance()).model_dump(mode="json")
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
 
 @app.get("/rpc/positions")
 async def rpc_positions() -> list:
-    return [item.model_dump(mode="json") for item in await adapter.get_positions()]
+    try:
+        return [item.model_dump(mode="json") for item in await adapter.get_positions()]
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
 
 @app.get("/rpc/position")
 async def rpc_position(symbol: str) -> dict:
-    return (await adapter.get_position(symbol)).model_dump(mode="json")
+    try:
+        return (await adapter.get_position(symbol)).model_dump(mode="json")
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
 
 @app.get("/rpc/open_orders")
@@ -67,7 +76,10 @@ async def rpc_open_orders(symbol: str | None = None) -> list:
 
 @app.get("/rpc/order/{cloid}")
 async def rpc_order(cloid: str) -> dict:
-    order = await adapter.get_order(cloid)
+    try:
+        order = await adapter.get_order(cloid)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     if order is None:
         raise HTTPException(status_code=404, detail="order not found")
     return order.model_dump(mode="json")
@@ -75,7 +87,10 @@ async def rpc_order(cloid: str) -> dict:
 
 @app.get("/rpc/fills")
 async def rpc_fills() -> list:
-    return [item.model_dump(mode="json") for item in await adapter.get_fills()]
+    try:
+        return [item.model_dump(mode="json") for item in await adapter.get_fills()]
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
 
 
 @app.post("/rpc/set_leverage")
@@ -125,8 +140,19 @@ async def rpc_market_data(symbol: str) -> dict:
     return {key: str(value) for key, value in data.items()}
 
 
+class QueryFailBody(BaseModel):
+    enabled: bool
+
+
 @app.post("/rpc/test/behavior")
 async def rpc_test_behavior(body: BehaviorBody) -> dict:
     """Mock-only test hook. Not a trading path for production Hyperliquid."""
     adapter.set_behavior(body.behavior)
     return {"ok": True, "behavior": body.behavior}
+
+
+@app.post("/rpc/test/query_fail")
+async def rpc_test_query_fail(body: QueryFailBody) -> dict:
+    """Mock-only test hook. Forces query RPCs to fail."""
+    adapter.set_query_fail(body.enabled)
+    return {"ok": True, "query_fail": body.enabled}

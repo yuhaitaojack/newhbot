@@ -62,6 +62,7 @@ async def seed_defaults(container: AppContainer) -> None:
             settings.active_strategy_version = "1"
         await ReservationRepository(session).ensure_slot()
         await session.commit()
+        await container.controller.reconcile_after_restart(session)
         await container.recovery.bootstrap(session)
 
 
