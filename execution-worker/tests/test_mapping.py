@@ -59,3 +59,6 @@ def test_map_order_and_fill_from_hummingbot_shaped_payloads() -> None:
     )
     assert fill.quantity == Decimal("0.1")
     assert fill.fee == Decimal("0.01")
+    assert fill.symbol == "BTC-USD"
+    assert order.cloid.startswith("0x")
+    assert len(order.cloid) == 34

@@ -1,0 +1,13 @@
+{
+  "universe": [
+    {
+      "name": "BTC",
+      "szDecimals": 5
+    }
+  ],
+  "ctxs": [
+    {
+      "markPx": "78002.0"
+    }
+  ]
+}

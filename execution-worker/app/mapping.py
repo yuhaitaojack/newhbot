@@ -28,6 +28,17 @@ class OneWayError(ValueError):
     """Account cannot be mapped to a single FLAT/LONG/SHORT."""
 
 
+def to_pair_symbol(coin: str, *, configured_pair: str) -> str:
+    symbol = str(coin)
+    if not symbol:
+        return symbol
+    if "-" in symbol:
+        return symbol
+    if configured_pair.endswith("-USD"):
+        return f"{symbol}-USD"
+    return symbol
+
+
 def map_szi_to_side(szi: Decimal) -> PositionSide:
     if szi > 0:
         return PositionSide.LONG
@@ -49,9 +60,7 @@ def map_hummingbot_position(raw: dict, *, configured_pair: str) -> ExchangePosit
         leverage = int(Decimal(str(leverage_raw)))
     ts = raw.get("timestamp")
     timestamp = datetime.fromtimestamp(ts / 1000, tz=timezone.utc) if isinstance(ts, (int, float)) else datetime.now(timezone.utc)
-    symbol = str(coin)
-    if symbol and not symbol.endswith("-USD") and configured_pair.endswith("-USD"):
-        symbol = f"{symbol}-USD" if "-" not in symbol else symbol
+    symbol = to_pair_symbol(str(coin), configured_pair=configured_pair)
     return ExchangePosition(
         symbol=symbol,
         side=side,
@@ -87,7 +96,7 @@ def map_clearinghouse_positions(asset_positions: list[dict], *, configured_pair:
     return mapped, reasons
 
 
-def map_hummingbot_order(raw: dict) -> ExchangeOrder:
+def map_hummingbot_order(raw: dict, *, configured_pair: str = "BTC-USD") -> ExchangeOrder:
     inner = raw.get("order", raw)
     status_raw = str(raw.get("status") or inner.get("status") or "open")
     qty = Decimal(str(inner.get("sz", inner.get("quantity", "0"))))
@@ -113,11 +122,14 @@ def map_hummingbot_order(raw: dict) -> ExchangeOrder:
     order_type = OrderType.MARKET if tif == "Ioc" else OrderType.LIMIT
     ts = inner.get("timestamp") or raw.get("statusTimestamp") or raw.get("time")
     timestamp = datetime.fromtimestamp(ts / 1000, tz=timezone.utc) if isinstance(ts, (int, float)) else datetime.now(timezone.utc)
-    cloid = str(inner.get("cloid") or raw.get("cloid") or "")
+    # v2.16.0 buy()/sell() send cloid as `0x` + md5(hbot_id).hexdigest() (32 hex chars, 34 total).
+    # Exchange orderUpdates/orderStatus echo `order.cloid` as that same string, or omit it.
+    cloid_raw = inner.get("cloid") if inner.get("cloid") not in (None, "") else raw.get("cloid")
+    cloid = "" if cloid_raw in (None, "") else str(cloid_raw)
     return ExchangeOrder(
         exchange_order_id=str(inner.get("oid")) if inner.get("oid") is not None else None,
         cloid=cloid,
-        symbol=str(inner.get("coin") or inner.get("symbol") or ""),
+        symbol=to_pair_symbol(str(inner.get("coin") or inner.get("symbol") or ""), configured_pair=configured_pair),
         side=side,
         order_type=order_type,
         price=Decimal(str(inner["limitPx"])) if inner.get("limitPx") is not None else None,
@@ -130,15 +142,15 @@ def map_hummingbot_order(raw: dict) -> ExchangeOrder:
     )
 
 
-def map_hummingbot_fill(raw: dict) -> ExchangeFill:
+def map_hummingbot_fill(raw: dict, *, configured_pair: str = "BTC-USD") -> ExchangeFill:
     side = OrderSide.BUY if str(raw.get("side", "")).lower() in {"b", "buy"} else OrderSide.SELL
     ts = raw.get("time")
     timestamp = datetime.fromtimestamp(ts / 1000, tz=timezone.utc) if isinstance(ts, (int, float)) else datetime.now(timezone.utc)
     return ExchangeFill(
         fill_id=str(raw.get("tid") or raw.get("fill_id") or raw.get("hash") or "0"),
         order_id=str(raw["oid"]) if raw.get("oid") is not None else None,
-        cloid=str(raw.get("cloid") or ""),
-        symbol=str(raw.get("coin") or raw.get("symbol") or ""),
+        cloid="" if raw.get("cloid") in (None, "") else str(raw.get("cloid")),
+        symbol=to_pair_symbol(str(raw.get("coin") or raw.get("symbol") or ""), configured_pair=configured_pair),
         side=side,
         price=Decimal(str(raw.get("px") or raw.get("price") or "0")),
         quantity=Decimal(str(raw.get("sz") or raw.get("quantity") or "0")),

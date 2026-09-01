@@ -34,6 +34,7 @@ class FakeConnector:
         self.orders: dict[str, dict] = {}
         self.fills: list[dict] = []
         self.asset_positions: list[dict] = []
+        self.hummingbot_account_positions: list[dict] | None = None
         self.account = {"equity": "10000", "available": "10000", "margin_used": "0"}
         self.mid = Decimal("100")
         self.raise_on_place = False
@@ -42,8 +43,10 @@ class FakeConnector:
     async def rest_snapshot(self) -> dict:
         if self.raise_on_query:
             raise TimeoutError("fake connector snapshot failed")
+        hb = self.hummingbot_account_positions if self.hummingbot_account_positions is not None else self.asset_positions
         return {
             "assetPositions": self.asset_positions,
+            "hummingbotPositions": hb,
             "openOrders": list(self.orders.values()),
             "fills": list(self.fills),
             "account": self.account,
@@ -127,15 +130,10 @@ class FakeConnector:
 
 
 def try_load_hummingbot_connector_class():
-    """Optional. PHASE 3 default is not to import or instantiate this."""
-    try:
-        from hummingbot.connector.derivative.hyperliquid_perpetual.hyperliquid_perpetual_derivative import (
-            HyperliquidPerpetualDerivative,
-        )
+    """Optional. Default worker path does not import or instantiate this."""
+    from app.hummingbot_readonly import try_load_hummingbot_connector_class as _load
 
-        return HyperliquidPerpetualDerivative
-    except Exception:
-        return None
+    return _load()
 
 
 # Imported by mapping tests; not used as a trading path.

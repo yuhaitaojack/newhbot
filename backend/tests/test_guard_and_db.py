@@ -43,6 +43,10 @@ def test_alembic_upgrade_creates_tables(tmp_path, monkeypatch) -> None:
     assert "uq_orders_intent_id" in indexes
     assert "uq_orders_request_id" in indexes
     assert "uq_orders_inflight_open_per_symbol" in indexes
+    fill_indexes = {item["name"] for item in inspector.get_indexes("fills")}
+    assert "uq_fills_exchange_fill_id" in fill_indexes or any(
+        "exchange_fill_id" in (item.get("name") or "") for item in inspector.get_indexes("fills")
+    )
 
 
 def test_effective_parameter_uses_default_when_disabled() -> None:

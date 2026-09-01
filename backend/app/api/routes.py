@@ -345,6 +345,7 @@ def _fill_out(row) -> FillOut:
         quantity=row.quantity,
         fee=row.fee,
         created_at=row.created_at,
+        exchange_fill_id=row.exchange_fill_id,
     )
 
 

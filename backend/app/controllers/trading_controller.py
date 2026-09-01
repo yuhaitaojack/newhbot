@@ -432,7 +432,13 @@ class TradingController:
             order.exchange_oid = viewed.exchange_oid
             if matching_fills and str(order.status) in {OrderStatus.FILLED.value, OrderStatus.PARTIAL.value}:
                 for fill in matching_fills:
-                    await self._record_fill(session, order, fill.price, fill.quantity)
+                    await self._record_fill(
+                        session,
+                        order,
+                        fill.price,
+                        fill.quantity,
+                        fill_id=getattr(fill, "fill_id", None),
+                    )
             await session.commit()
             await self._sync_exchange_mirror(session, order.symbol)
             await self._maybe_leave_recovery(session)
@@ -481,7 +487,15 @@ class TradingController:
         nxt = SystemState.RUNNING if settings.trading_enabled else SystemState.STOPPED
         await self._recovery.set_state(session, nxt, "unresolved_orders_cleared")
 
-    async def _record_fill(self, session: AsyncSession, order: Order, price: Decimal, quantity: Decimal) -> None:
+    async def _record_fill(
+        self,
+        session: AsyncSession,
+        order: Order,
+        price: Decimal,
+        quantity: Decimal,
+        *,
+        fill_id: str | None = None,
+    ) -> None:
         fill = Fill(
             id=new_id(),
             order_id=order.id,
@@ -490,13 +504,17 @@ class TradingController:
             side=order.side,
             price=price,
             quantity=quantity,
+            exchange_fill_id=fill_id,
         )
-        await FillRepository(session).add(fill)
+        stored, created = await FillRepository(session).add(fill)
+        if not created:
+            _ = stored
+            return
         await session.commit()
         await self._emit(
             session,
             "fill",
-            {"cloid": order.cloid, "price": str(price), "quantity": str(quantity)},
+            {"cloid": order.cloid, "price": str(price), "quantity": str(quantity), "fill_id": fill_id},
         )
         trades = TradeRepository(session)
         if order.reduce_only:

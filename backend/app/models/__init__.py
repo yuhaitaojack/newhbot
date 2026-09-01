@@ -118,6 +118,7 @@ class Fill(Base):
     price: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
     fee: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False, default=Decimal("0"))
+    exchange_fill_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -11,6 +11,7 @@ class ExchangeStateStore:
         self.positions: dict[str, ExchangePosition] = {}
         self.orders: dict[str, ExchangeOrder] = {}
         self.fills: list[ExchangeFill] = []
+        self._fill_ids: set[str] = set()
         self.sync_status = SyncStatus.NONE
         self.ws_connected = False
         self.needs_reconciliation = False
@@ -26,7 +27,10 @@ class ExchangeStateStore:
         self.positions = {item.symbol: item for item in positions if item.side != PositionSide.FLAT}
         self.orders = {item.cloid: item for item in orders}
         if fills is not None:
-            self.fills = list(fills)
+            self.fills = []
+            self._fill_ids = set()
+            for item in fills:
+                self._remember_fill(item)
         self.sync_status = SyncStatus.SNAPSHOT
         self.needs_reconciliation = False
         self.conflict_reason = None
@@ -47,7 +51,8 @@ class ExchangeStateStore:
             self.sync_status = SyncStatus.LIVE
 
     def apply_ws_fill(self, fill: ExchangeFill, position: ExchangePosition | None = None) -> None:
-        self.fills.append(fill)
+        if not self._remember_fill(fill):
+            return
         if fill.cloid in self.orders:
             order = self.orders[fill.cloid]
             filled = order.filled_quantity + fill.quantity
@@ -79,6 +84,19 @@ class ExchangeStateStore:
         if self.ws_connected and not self.needs_reconciliation:
             self.sync_status = SyncStatus.LIVE
 
+    def _remember_fill(self, fill: ExchangeFill) -> bool:
+        if fill.fill_id and fill.fill_id in self._fill_ids:
+            return False
+        if fill.fill_id:
+            self._fill_ids.add(fill.fill_id)
+        self.fills.append(fill)
+        return True
+
+    def mark_conflict(self, reason: str) -> None:
+        self.needs_reconciliation = True
+        self.conflict_reason = reason
+        self.sync_status = SyncStatus.CONFLICT
+
     def mark_ws(self, connected: bool) -> None:
         self.ws_connected = connected
         if not connected:
@@ -91,8 +109,6 @@ class ExchangeStateStore:
         orders: list[ExchangeOrder],
         fills: list[ExchangeFill] | None = None,
     ) -> None:
-        """REST is exchange truth after WS drop or CONFLICT."""
+        """Apply a REST snapshot after WS drop or CONFLICT, then re-verify before READY."""
         self.apply_rest_snapshot(positions=positions, orders=orders, fills=fills)
         self.sync_status = SyncStatus.SNAPSHOT
-        self.needs_reconciliation = False
-        self.conflict_reason = None

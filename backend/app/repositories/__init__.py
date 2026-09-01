@@ -134,10 +134,18 @@ class FillRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def add(self, fill: Fill) -> Fill:
+    async def get_by_exchange_fill_id(self, exchange_fill_id: str) -> Fill | None:
+        result = await self._session.execute(select(Fill).where(Fill.exchange_fill_id == exchange_fill_id))
+        return result.scalar_one_or_none()
+
+    async def add(self, fill: Fill) -> tuple[Fill, bool]:
+        if fill.exchange_fill_id:
+            existing = await self.get_by_exchange_fill_id(fill.exchange_fill_id)
+            if existing is not None:
+                return existing, False
         self._session.add(fill)
         await self._session.flush()
-        return fill
+        return fill, True
 
     async def list_recent(self, limit: int = 100) -> Sequence[Fill]:
         result = await self._session.execute(select(Fill).order_by(Fill.created_at.desc()).limit(limit))

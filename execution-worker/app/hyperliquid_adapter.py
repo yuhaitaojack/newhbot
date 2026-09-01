@@ -6,7 +6,9 @@ from app.config import WorkerConfig
 from app.connector_bridge import ConnectorBridge, FakeConnector
 from app.exchange_models import InstrumentMeta, WorkerState
 from app.ioc_price import ioc_limit_price
+from app.instrument_meta import default_btc_instrument_meta
 from app.mapping import OneWayError, map_clearinghouse_positions, map_hummingbot_fill, map_hummingbot_order
+from app.reconciliation import compare_rest_and_hummingbot
 from app.protocol import (
     BalanceView,
     FillView,
@@ -51,15 +53,9 @@ class HyperliquidExecutionAdapter:
         self.last_normalized: PlaceOrderRequest | None = None
         self.last_wire: dict | None = None
         self._submitted_cloids: set[str] = set()
-        self.meta = meta or InstrumentMeta(
-            symbol=config.trading_pair,
-            sz_decimals=4,
-            step_size=Decimal("0.0001"),
-            tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.0001"),
-            min_notional=Decimal("10"),
-            max_leverage=50,
-        )
+        self.meta = meta or default_btc_instrument_meta()
+        if self.meta.symbol != config.trading_pair:
+            self.meta = self.meta.model_copy(update={"symbol": config.trading_pair})
         self.mid = Decimal("100")
         self.leverage_mismatch = False
         self.observed_leverage: int | None = None
@@ -70,8 +66,18 @@ class HyperliquidExecutionAdapter:
 
     async def connect(self) -> None:
         await self._rest_snapshot()
-        self.store.mark_ws(True)
-        self.connected = True
+        live_readonly = bool(getattr(self.connector, "read_only", False))
+        has_user_stream = bool(getattr(self.connector, "has_user_stream", False))
+        if live_readonly and not has_user_stream:
+            self.store.mark_ws(False)
+            self.connected = True
+            self.recovery_reason = (
+                self.recovery_reason
+                or "NOT VERIFIED — credentials required for authenticated read-only validation"
+            )
+        else:
+            self.store.mark_ws(True)
+            self.connected = True
 
     async def disconnect(self) -> None:
         self.store.mark_ws(False)
@@ -103,9 +109,30 @@ class HyperliquidExecutionAdapter:
             self.leverage_mismatch = True
         else:
             self.leverage_mismatch = False
-        orders = [map_hummingbot_order(item) for item in snap.get("openOrders") or []]
-        fills = [map_hummingbot_fill(item) for item in snap.get("fills") or []]
+        orders = [
+            map_hummingbot_order(item, configured_pair=self.config.trading_pair)
+            for item in snap.get("openOrders") or []
+        ]
+        fills = [
+            map_hummingbot_fill(item, configured_pair=self.config.trading_pair)
+            for item in snap.get("fills") or []
+        ]
         self.store.resync_from_rest(positions=positions, orders=orders, fills=fills)
+        hb_raw = snap.get("hummingbotPositions")
+        if hb_raw is not None:
+            try:
+                hb_positions, _ = map_clearinghouse_positions(
+                    hb_raw,
+                    configured_pair=self.config.trading_pair,
+                )
+            except OneWayError as exc:
+                self.one_way_ok = False
+                self.recovery_reason = str(exc)
+                hb_positions = []
+            mismatch = compare_rest_and_hummingbot(positions, hb_positions)
+            if mismatch:
+                self.store.mark_conflict(mismatch)
+                self.recovery_reason = mismatch
 
     def worker_state(self) -> WorkerState:
         if not self.connected:
@@ -168,13 +195,14 @@ class HyperliquidExecutionAdapter:
         if raw is None:
             stored = self.store.orders.get(cloid)
             return self._order_view(stored) if stored else None
-        mapped = map_hummingbot_order(raw)
+        mapped = map_hummingbot_order(raw, configured_pair=self.config.trading_pair)
         return self._order_view(mapped)
 
     async def get_fills(self) -> list[FillView]:
         raw = await self.connector.get_fills()
         return [
             FillView(
+                fill_id=item.fill_id,
                 cloid=item.cloid,
                 symbol=item.symbol,
                 side=item.side,
@@ -182,12 +210,12 @@ class HyperliquidExecutionAdapter:
                 quantity=item.quantity,
                 fee=item.fee,
             )
-            for item in (map_hummingbot_fill(row) for row in raw)
+            for item in (map_hummingbot_fill(row, configured_pair=self.config.trading_pair) for row in raw)
         ]
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
-        if not self.config.execution_enabled:
-            raise ExecutionDisabled("set_leverage blocked: execution disabled")
+        if getattr(self.connector, "read_only", False) or not self.config.execution_enabled:
+            raise ExecutionDisabled("set_leverage blocked: execution disabled or read-only")
         await self.connector.set_leverage(symbol, leverage)
 
     async def get_market_data(self, symbol: str) -> dict[str, Decimal]:
@@ -246,7 +274,14 @@ class HyperliquidExecutionAdapter:
             "order_type": normalized.order_type.value,
         }
         self.last_wire = wire
-        if not self.config.execution_enabled:
+        if getattr(self.connector, "read_only", False) or not self.config.execution_enabled:
+            if getattr(self.connector, "read_only", False):
+                return PlaceOrderResponse(
+                    request_id=request.request_id,
+                    cloid=request.cloid,
+                    status=OrderStatus.REJECTED,
+                    error="read-only connector; place/cancel/leverage forbidden",
+                )
             return PlaceOrderResponse(
                 request_id=request.request_id,
                 cloid=request.cloid,
@@ -256,7 +291,7 @@ class HyperliquidExecutionAdapter:
         self._submitted_cloids.add(request.cloid)
         result = await self.connector.place(wire)
         raw = result.get("order") or {}
-        mapped = map_hummingbot_order(raw)
+        mapped = map_hummingbot_order(raw, configured_pair=self.config.trading_pair)
         self.store.apply_ws_order(mapped)
         return PlaceOrderResponse(
             request_id=request.request_id,
@@ -282,8 +317,8 @@ class HyperliquidExecutionAdapter:
 
     async def cancel_order(self, cloid: str, request_id: str) -> OrderView | None:
         _ = request_id
-        if not self.config.execution_enabled:
-            raise ExecutionDisabled("cancel_order blocked: execution disabled")
+        if getattr(self.connector, "read_only", False) or not self.config.execution_enabled:
+            raise ExecutionDisabled("cancel_order blocked: execution disabled or read-only")
         await self.connector.cancel(cloid)
         return await self.get_order(cloid)
 

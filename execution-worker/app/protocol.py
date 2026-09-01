@@ -95,6 +95,7 @@ class FillView(BaseModel):
     price: Decimal
     quantity: Decimal
     fee: Decimal = Decimal("0")
+    fill_id: str | None = None
 
 
 class ExecutionAdapter(Protocol):

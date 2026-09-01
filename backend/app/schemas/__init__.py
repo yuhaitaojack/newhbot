@@ -101,6 +101,7 @@ class FillOut(BaseModel):
     quantity: Decimal
     fee: Decimal
     created_at: datetime
+    exchange_fill_id: str | None = None
 
 
 class TradeOut(BaseModel):
