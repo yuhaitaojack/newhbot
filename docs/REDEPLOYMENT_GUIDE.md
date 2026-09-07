@@ -152,6 +152,8 @@ docker compose -f docker-compose.yml -f docker-compose.testnet-live.example.yml 
 - Hyperliquid 的“市价”由连接器用带滑点的 IOC 限价实现，不能按传统交易所原生市价的成交语义估计风险。
 - 网络超时后的开仓不能随意换新 `cloid` 重发，避免重复开仓；应先查询订单、挂单和仓位，必要时进入 Recovery。
 - 当前策略是信号型 `ema5break`，不是完整的 Hummingbot Strategy V2 Controller；策略不得直接调用交易所或下单函数。
+- 最近一次实盘流程在用户要求下停止，完成计数为 LONG 2/5、SHORT 4/5；未完成的运行状态和数据库没有提交到 GitHub，重新部署后必须从只读预检开始。
+- 某些执行 Worker 的真实连接器测试需要访问 `api.hyperliquid.xyz`；若目标机器 DNS、代理或防火墙不通，该测试会失败，但 Mock 测试不受影响，不能用修改测试来掩盖网络问题。
 
 ## 10. 重新部署完成检查表
 

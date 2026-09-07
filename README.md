@@ -8,7 +8,7 @@
 - 需求：`docs/PROJECT_REQUIREMENTS.md`
 - 架构：`docs/ARCHITECTURE.md`
 - 跨电脑部署与交接：`docs/REDEPLOYMENT_GUIDE.md`
-- 最新阶段报告：`docs/PHASE_143_REPORT.md`
+- 最新阶段报告：`docs/PHASE_149_REPORT.md`
 
 ```
 docker compose up -d
