@@ -1,3 +1,9 @@
+"""Instrument metadata helpers for tests and FakeConnector trading_rules seed.
+
+Production Adapter must not treat this module as live exchange trading rules.
+Live production rules come from Connector.trading_rules.
+"""
+
 from __future__ import annotations
 
 import json
@@ -5,10 +11,10 @@ import urllib.error
 import urllib.request
 from decimal import Decimal
 
-from app.config import MIN_NOTIONAL_SIZE
+from app.config import HYPERLIQUID_INFO_URLS, HYPERLIQUID_TESTNET_DOMAIN, MIN_NOTIONAL_SIZE
 from app.exchange_models import InstrumentMeta
 
-PUBLIC_INFO_URL = "https://api.hyperliquid.xyz/info"
+PUBLIC_INFO_URL = HYPERLIQUID_INFO_URLS[HYPERLIQUID_TESTNET_DOMAIN]
 
 
 def tick_from_mark_px(mark_px: str) -> Decimal:
@@ -48,9 +54,15 @@ def extract_coin_meta(exchange_info: list, coin: str, *, quote: str = "USD") -> 
     raise KeyError(f"{coin} not in metaAndAssetCtxs universe")
 
 
-def fetch_public_meta_and_asset_ctxs(*, timeout: float = 20.0) -> list:
+def fetch_public_meta_and_asset_ctxs(
+    *, timeout: float = 20.0, domain: str = HYPERLIQUID_TESTNET_DOMAIN
+) -> list:
+    try:
+        info_url = HYPERLIQUID_INFO_URLS[domain]
+    except KeyError as exc:
+        raise ValueError("unsupported Hyperliquid domain") from exc
     req = urllib.request.Request(
-        PUBLIC_INFO_URL,
+        info_url,
         data=json.dumps({"type": "metaAndAssetCtxs"}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -62,9 +74,11 @@ def fetch_public_meta_and_asset_ctxs(*, timeout: float = 20.0) -> list:
         raise RuntimeError(f"public metaAndAssetCtxs failed: {exc}") from exc
 
 
-def fetch_public_instrument(trading_pair: str, *, timeout: float = 20.0) -> InstrumentMeta:
+def fetch_public_instrument(
+    trading_pair: str, *, timeout: float = 20.0, domain: str = HYPERLIQUID_TESTNET_DOMAIN
+) -> InstrumentMeta:
     coin, _, quote = trading_pair.partition("-")
-    info = fetch_public_meta_and_asset_ctxs(timeout=timeout)
+    info = fetch_public_meta_and_asset_ctxs(timeout=timeout, domain=domain)
     return extract_coin_meta(info, coin, quote=quote or "USD")
 
 

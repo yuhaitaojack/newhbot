@@ -11,6 +11,19 @@ def test_timeout_after_accept_recovers_from_get_order(app_client) -> None:
     assert result.json()["status"] == OrderStatus.OPEN.value
     assert result.json()["accepted"] is True
     assert fake.place_calls == 1
+
+
+def test_unknown_reconciliation_sync_failure_stays_in_recovery(app_client) -> None:
+    client, _, fake = app_client
+    client.post("/api/trading/start")
+    fake.place_mode = "timeout_after_accept"
+    fake.sync_error_after_timeout = True
+
+    result = client.post("/api/trading/signal", json={"signal": "LONG"})
+
+    assert result.json()["status"] == OrderStatus.OPEN.value
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
+    assert fake.place_calls == 1
     fake.place_mode = "fill"
     blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
     assert blocked.json()["accepted"] is False

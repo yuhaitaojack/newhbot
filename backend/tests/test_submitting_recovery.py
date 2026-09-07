@@ -151,3 +151,37 @@ async def test_submitting_crash_unconfirmed_stays_unknown_blocks_open(tmp_path) 
             blocked_long = await app2.state.container.controller.handle_signal(session, SignalType.LONG)
             assert blocked_long["accepted"] is False
         assert fake.place_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_start_terminalizes_stale_opening_after_exchange_flat(tmp_path) -> None:
+    """A prior filled/vanished market entry must not block the next independent open."""
+    db_file = tmp_path / "stale_opening.db"
+    fake = FakeExecutionClient()
+    settings = _settings(db_file)
+    app = create_app(settings=settings, execution=fake, bootstrap_schema=True)
+    async with app.router.lifespan_context(app):
+        async with app.state.container.session_factory() as session:
+            current = await SettingsRepository(session).get()
+            session.add(
+                Order(
+                    id=new_id(),
+                    intent_id=new_id(),
+                    request_id=new_id(),
+                    cloid=new_cloid(),
+                    symbol=current.trading_pair,
+                    side=OrderSide.BUY.value,
+                    order_type=OrderType.MARKET.value,
+                    quantity=Decimal("1"),
+                    reduce_only=False,
+                    status=OrderStatus.OPEN.value,
+                )
+            )
+            await session.commit()
+            started = await app.state.container.controller.start(session)
+            assert started["ok"] is True
+            rows = await OrderRepository(session).list_open()
+            assert rows == []
+            opened = await app.state.container.controller.handle_signal(session, SignalType.LONG)
+            assert opened["accepted"] is True
+        assert fake.place_calls == 1

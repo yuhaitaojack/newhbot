@@ -15,6 +15,8 @@ FORBIDDEN_CONNECTOR_METHODS = frozenset(
         "updateLeverage",
         "set_leverage",
         "_set_trading_pair_leverage",
+        "_execute_order_cancel",
+        "_execute_order_cancel_and_process_update",
     }
 )
 

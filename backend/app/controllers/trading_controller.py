@@ -73,6 +73,28 @@ class TradingController:
             await self._emit(session, "signal", {"signal": signal.value, "accepted": True})
             return {"accepted": True, "reason": "hold", "signal_id": record.id}
 
+        if signal == SignalType.CLOSE and settings.system_state == SystemState.RECOVERY.value:
+            record.reason = "recovery forbids strategy close; explicit close required"
+            await session.commit()
+            await AuditRepository(session).add(
+                "ignored_strategy_close_in_recovery",
+                json.dumps({"signal": signal.value}),
+                actor=actor,
+            )
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+
+        if settings.close_intent == "in_progress":
+            record.reason = "close in progress"
+            await session.commit()
+            await AuditRepository(session).add(
+                "ignored_during_close",
+                json.dumps({"signal": signal.value}),
+                actor=actor,
+            )
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+
         local = await self._local_side(session, settings.trading_pair)
         if signal in {SignalType.LONG, SignalType.SHORT} and self._guard.reverse_is_forbidden(local, signal):
             record.reason = "automatic reverse is forbidden"
@@ -126,24 +148,62 @@ class TradingController:
         if await OrderRepository(session).has_unresolved():
             await self._recovery.enter_recovery(session, "unresolved_orders")
             return {"ok": False, "reason": "unresolved orders present; new opens forbidden"}
-        settings.trading_enabled = True
         await self._recovery.set_state(session, SystemState.STARTING, "user_start")
-        connected = await self._execution.health()
+        try:
+            connected = await self._execution.health()
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"worker_health_query_failed:{type(exc).__name__}")
+            return {"ok": False, "reason": "execution worker health query failed; recovery required"}
         if not connected:
-            await self._recovery.set_state(session, SystemState.CONNECTING, "worker_down")
-            return {"ok": False, "reason": "execution worker unreachable"}
-        await self._execution.connect()
-        configure = getattr(self._execution, "configure", None)
-        if configure is not None:
-            await configure(settings.trading_pair, settings.slippage, settings.leverage)
-        if not await self._execution.is_ready():
+            await self._recovery.enter_recovery(session, "worker_unreachable")
+            return {"ok": False, "reason": "execution worker unreachable; recovery required"}
+        try:
+            await self._execution.connect()
+            configure = getattr(self._execution, "configure", None)
+            if configure is not None:
+                await configure(settings.trading_pair, settings.slippage, settings.leverage)
+            ready = await self._execution.is_ready()
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"worker_start_failed:{type(exc).__name__}")
+            return {"ok": False, "reason": "execution worker startup failed; recovery required"}
+        if not ready:
             await self._recovery.enter_recovery(session, "worker_not_ready")
             return {"ok": False, "reason": "execution worker not READY"}
         await self._recovery.set_state(session, SystemState.SYNCING, "user_start")
-        await self._sync_exchange_mirror(session, settings.trading_pair)
+        synced = await self._sync_exchange_mirror(session, settings.trading_pair)
+        mirror = await PositionRepository(session).get_or_none(settings.trading_pair)
+        if (
+            not synced
+            or mirror is None
+            or mirror.side == PositionSide.UNKNOWN.value
+        ):
+            await self._recovery.enter_recovery(session, "exchange_mirror_unavailable")
+            return {"ok": False, "reason": "exchange position query failed"}
+        try:
+            positions = await self._execution.get_positions()
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"exchange_positions_query_failed:{type(exc).__name__}")
+            return {"ok": False, "reason": "exchange positions query failed"}
+        if any(item.side != PositionSide.FLAT and item.symbol != settings.trading_pair for item in positions):
+            await self._recovery.enter_recovery(session, "foreign_position_present")
+            return {"ok": False, "reason": "foreign exchange position present; recovery required"}
+        try:
+            open_orders = await self._execution.get_open_orders()
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"exchange_open_orders_query_failed:{type(exc).__name__}")
+            return {"ok": False, "reason": "exchange open orders query failed"}
+        if open_orders:
+            await self._recovery.enter_recovery(session, "exchange_open_orders_present")
+            return {"ok": False, "reason": "exchange open orders present; recovery required"}
+        if mirror.side == PositionSide.FLAT.value:
+            await self._terminalize_stale_openings_after_flat(session, settings.trading_pair)
         if await OrderRepository(session).has_unresolved():
             await self._recovery.enter_recovery(session, "unresolved_orders")
             return {"ok": False, "reason": "unresolved orders present; new opens forbidden"}
+        # Do not persist the trading switch until every worker and exchange
+        # preflight has succeeded. Failed starts must remain disabled in
+        # RECOVERY instead of leaving a misleading enabled flag behind.
+        settings.trading_enabled = True
         await self._recovery.set_state(session, SystemState.RUNNING, "user_start")
         await AuditRepository(session).add("start", "{}", actor="user")
         await session.commit()
@@ -158,10 +218,41 @@ class TradingController:
         )
         return {"ok": True, "state": SystemState.RUNNING.value}
 
+    async def _terminalize_stale_openings_after_flat(self, session: AsyncSession, symbol: str) -> int:
+        """Close local ACK/OPEN/PARTIAL opening rows only after exchange FLAT + no open orders.
+
+        Exchange state is authoritative. This repairs a local lifecycle gap where a filled
+        market entry was left OPEN after its exchange order disappeared, without deleting
+        the audit row or permitting a new order while an exchange order is still live.
+        """
+        stale = await OrderRepository(session).list_reconcilable_opening(symbol)
+        for order in stale:
+            order.status = OrderStatus.CANCELED.value
+            prior = order.error_message or ""
+            order.error_message = (
+                f"{prior}; " if prior else ""
+            ) + "terminalized during exchange-flat reconciliation; no exchange open order"
+            await AuditRepository(session).add(
+                "stale_opening_terminalized",
+                json.dumps({"order_id": order.id, "cloid": order.cloid, "symbol": symbol}),
+                actor="recovery",
+            )
+        if stale:
+            await session.commit()
+        return len(stale)
+
+    async def enter_recovery(self, session: AsyncSession, reason: str) -> None:
+        """Move the persisted control state to Recovery after a supervised failure."""
+        await self._recovery.enter_recovery(session, reason)
+
     async def stop(self, session: AsyncSession) -> dict:
         settings = await SettingsRepository(session).get()
         settings.trading_enabled = False
-        await self._cancel_opening_orders(session)
+        canceled = await self._cancel_opening_orders(session)
+        if not canceled:
+            await self._recovery.enter_recovery(session, "stop_cancel_unconfirmed")
+            await session.commit()
+            return {"ok": False, "reason": "open order cancellation unconfirmed; recovery required"}
         await self._recovery.set_state(session, SystemState.STOPPED, "user_stop")
         await AuditRepository(session).add("stop", "{}", actor="user")
         await session.commit()
@@ -180,16 +271,104 @@ class TradingController:
         settings = await SettingsRepository(session).get()
         settings.estop = True
         settings.trading_enabled = False
-        await self._cancel_all_orders(session)
-        close_result = await self._close_position(session, None, stop_after=True, emergency=True)
+        canceled = await self._cancel_all_orders(session)
+        if not canceled:
+            await self._recovery.enter_recovery(session, "emergency_cancel_unconfirmed")
+            close_result = {
+                "ok": False,
+                "reason": "order cancellation unconfirmed; recovery required",
+            }
+        else:
+            close_result = await self._close_position(session, None, stop_after=True, emergency=True)
         await AuditRepository(session).add("emergency_stop", json.dumps(close_result), actor="user")
         await session.commit()
         return close_result
 
+    async def clear_estop(self, session: AsyncSession) -> dict:
+        """Query-only unlatch. Never places, cancels, sets leverage, or starts trading."""
+        settings = await SettingsRepository(session).get()
+        audit = AuditRepository(session)
+
+        async def reject(reason: str, *, recovery: bool = False) -> dict:
+            if recovery:
+                await self._recovery.enter_recovery(session, f"clear_estop:{reason}")
+            fresh = await SettingsRepository(session).get()
+            await audit.add("clear_estop_rejected", json.dumps({"reason": reason}), actor="user")
+            await session.commit()
+            await self._emit(session, "estop", {"estop": True, "cleared": False, "reason": reason})
+            return {
+                "ok": False,
+                "reason": reason,
+                "estop": True,
+                "state": fresh.system_state,
+            }
+
+        if not settings.estop:
+            return await reject("emergency stop is not latched")
+        if await OrderRepository(session).has_unresolved():
+            return await reject("unresolved or UNKNOWN orders present")
+        if await OrderRepository(session).list_open():
+            return await reject("open orders present")
+
+        try:
+            connected = await self._execution.health()
+        except Exception as exc:
+            return await reject(f"worker health query failed: {type(exc).__name__}", recovery=True)
+        if not connected:
+            return await reject("execution worker unreachable", recovery=True)
+        try:
+            position = await self._execution.get_position(settings.trading_pair)
+            positions = await self._execution.get_positions()
+            open_orders = await self._execution.get_open_orders()
+        except Exception as exc:
+            return await reject(f"exchange query failed: {type(exc).__name__}", recovery=True)
+
+        if position.side == PositionSide.UNKNOWN:
+            return await reject("position side is UNKNOWN", recovery=True)
+        if position.side != PositionSide.FLAT:
+            return await reject("position is not FLAT")
+        if any(item.side != PositionSide.FLAT and item.symbol != settings.trading_pair for item in positions):
+            return await reject("foreign position present")
+        if open_orders:
+            return await reject("open orders present")
+
+        settings.estop = False
+        settings.trading_enabled = False
+        if settings.system_state not in {SystemState.STOPPED.value, SystemState.RECOVERY.value}:
+            await self._recovery.set_state(session, SystemState.STOPPED, "clear_estop")
+        await audit.add(
+            "clear_estop",
+            json.dumps({"state": settings.system_state, "trading_enabled": False}),
+            actor="user",
+        )
+        await session.commit()
+        await self._emit(
+            session,
+            "estop",
+            {
+                "estop": False,
+                "cleared": True,
+                "trading_enabled": False,
+                "state": settings.system_state,
+            },
+        )
+        return {
+            "ok": True,
+            "estop": False,
+            "state": settings.system_state,
+            "reason": "estop_cleared_still_stopped",
+        }
+
     async def _open(self, session: AsyncSession, signal: SignalType, record: Signal) -> dict:
         settings = await SettingsRepository(session).get()
-        reachable = await self._execution.health()
-        ready = await self._execution.is_ready() if reachable else False
+        try:
+            reachable = await self._execution.health()
+            ready = await self._execution.is_ready() if reachable else False
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"worker_status_query_failed:{type(exc).__name__}")
+            record.reason = "execution worker status query failed; recovery required"
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
         exchange_side = PositionSide.UNKNOWN
         foreign = False
         if reachable:
@@ -199,8 +378,35 @@ class TradingController:
                 foreign = any(
                     item.side != PositionSide.FLAT and item.symbol != settings.trading_pair for item in positions
                 )
-            except Exception:
+                open_orders = await self._execution.get_open_orders()
+                if open_orders:
+                    await self._recovery.enter_recovery(session, "exchange_open_orders_present")
+                    record.reason = "exchange open orders present"
+                    await session.commit()
+                    return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+                synced = await self._sync_exchange_mirror(session, settings.trading_pair)
+                if not synced:
+                    await self._recovery.enter_recovery(session, "exchange_mirror_unavailable")
+                    record.reason = "exchange position query failed"
+                    await session.commit()
+                    return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+            except Exception as exc:
                 ready = False
+                reason = f"open_exchange_query_failed:{type(exc).__name__}"
+                await self._recovery.enter_recovery(session, reason)
+                record.reason = "exchange query failed"
+                await session.commit()
+                return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+        if not reachable:
+            await self._recovery.enter_recovery(session, "worker_unreachable_during_open")
+            record.reason = "execution worker unreachable; recovery required"
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
+        if not ready:
+            await self._recovery.enter_recovery(session, "worker_not_ready_during_open")
+            record.reason = "execution worker not READY; recovery required"
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
         local = await self._local_side(session, settings.trading_pair)
         has_unresolved = await OrderRepository(session).has_unresolved()
         reservation_held = await ReservationRepository(session).current_order_id() is not None
@@ -224,7 +430,13 @@ class TradingController:
             return {"accepted": False, "reason": guard.reason, "signal_id": record.id}
 
         side = OrderSide.BUY if signal == SignalType.LONG else OrderSide.SELL
-        quantity = await self._size_from_settings(session)
+        try:
+            quantity = await self._size_from_settings(session)
+        except Exception as exc:
+            await self._recovery.enter_recovery(session, f"open_size_query_failed:{type(exc).__name__}")
+            record.reason = f"size unavailable: {type(exc).__name__}"
+            await session.commit()
+            return {"accepted": False, "reason": record.reason, "signal_id": record.id}
         order_id = new_id()
         reserved = await ReservationRepository(session).try_acquire(order_id, reason="open")
         if not reserved:
@@ -272,6 +484,13 @@ class TradingController:
                 await session.commit()
             return {"ok": False, "reason": "exchange query failed"}
 
+        if exchange.side == PositionSide.UNKNOWN:
+            await self._recovery.enter_recovery(session, "close_position_unknown")
+            if record:
+                record.reason = "exchange position unknown; recovery required"
+                await session.commit()
+            return {"ok": False, "reason": "exchange position unknown; recovery required"}
+
         if exchange.side == PositionSide.FLAT:
             settings.close_intent = None
             await ReservationRepository(session).release()
@@ -284,7 +503,11 @@ class TradingController:
             await session.commit()
             return {"ok": True, "reason": "already_flat"}
 
-        await self._cancel_opening_orders(session)
+        canceled = await self._cancel_opening_orders(session)
+        if not canceled:
+            await self._recovery.enter_recovery(session, "close_cancel_unconfirmed")
+            await session.commit()
+            return {"ok": False, "reason": "open order cancellation unconfirmed; recovery required"}
         close_side = OrderSide.SELL if exchange.side == PositionSide.LONG else OrderSide.BUY
         order = await self._submit(
             session,
@@ -297,10 +520,39 @@ class TradingController:
         if order.status == OrderStatus.UNKNOWN:
             await self._recovery.enter_recovery(session, "unknown_close")
             return {"ok": False, "reason": "close order UNKNOWN", "cloid": order.cloid}
+        if order.status == OrderStatus.REJECTED:
+            settings.close_intent = None
+            await self._recovery.enter_recovery(
+                session, f"close_rejected:{order.error_message or 'execution worker rejected order'}"
+            )
+            await session.commit()
+            return {"ok": False, "reason": order.error_message or "close order rejected", "cloid": order.cloid}
 
-        await self._sync_exchange_mirror(session, settings.trading_pair)
+        synced = await self._sync_exchange_mirror(session, settings.trading_pair)
+        if not synced:
+            await self._recovery.enter_recovery(session, "post_order_sync_failed")
+            await session.commit()
+            return {"ok": False, "reason": "close confirmation required", "cloid": order.cloid}
+        try:
+            live = await self._execution.get_position(settings.trading_pair)
+        except Exception as exc:
+            await self._recovery.enter_recovery(
+                session, f"close_confirmation_query_failed:{type(exc).__name__}"
+            )
+            await session.commit()
+            return {"ok": False, "reason": "close confirmation required", "cloid": order.cloid}
+        if live.side == PositionSide.UNKNOWN:
+            await self._recovery.enter_recovery(session, "close_confirmation_position_unknown")
+            await session.commit()
+            return {"ok": False, "reason": "close confirmation required", "cloid": order.cloid}
+        if live.side != PositionSide.FLAT:
+            await self._recovery.enter_recovery(
+                session, f"close_confirmation_not_flat:{live.side.value}"
+            )
+            await session.commit()
+            return {"ok": False, "reason": "close confirmation required", "cloid": order.cloid}
+        await self._terminalize_stale_openings_after_flat(session, settings.trading_pair)
         settings.close_intent = None
-        live = await self._execution.get_position(settings.trading_pair)
         if live.side == PositionSide.FLAT:
             await ReservationRepository(session).release()
         if stop_after:
@@ -385,9 +637,106 @@ class TradingController:
             await self._record_fill(session, order, response.avg_price or Decimal("0"), response.filled_quantity)
         if str(order.status) == OrderStatus.REJECTED.value and not reduce_only:
             await ReservationRepository(session).release(order.id)
-        await self._sync_exchange_mirror(session, symbol)
+        synced = await self._sync_exchange_mirror(session, symbol)
+        if not synced:
+            await self._recovery.enter_recovery(session, "post_order_sync_failed")
+            await session.commit()
+        elif order.order_type == OrderType.MARKET.value:
+            if reduce_only:
+                await self._finalize_confirmed_market_close(session, order)
+            else:
+                await self._finalize_confirmed_market_open(session, order)
         await self._emit(session, "order", {"cloid": cloid, "status": order.status})
         return order
+
+    async def _finalize_confirmed_market_open(self, session: AsyncSession, order: Order) -> None:
+        """Resolve an IOC response reported OPEN after exchange position confirms a full fill.
+
+        Hyperliquid/Hummingbot can return the immediate IOC acknowledgement as
+        OPEN before the fill event is reflected in the connector order object.
+        Exchange position state is authoritative here, and the pre-open guard
+        already proved this symbol was FLAT. Limit/GTC orders are intentionally
+        excluded because an OPEN result may be a genuine resting order.
+        """
+        if order.order_type != OrderType.MARKET.value or order.status != OrderStatus.OPEN.value:
+            return
+        try:
+            live = await self._execution.get_position(order.symbol)
+            if live.side not in {PositionSide.LONG, PositionSide.SHORT} or live.size <= 0:
+                return
+            expected = PositionSide.LONG if order.side == OrderSide.BUY.value else PositionSide.SHORT
+            if live.side != expected:
+                return
+            fills = await self._execution.get_fills()
+            matching = [item for item in fills if item.cloid == order.cloid]
+            filled_total = sum((item.quantity for item in matching), Decimal("0"))
+            # Prefer exact fill evidence. If the connector has not propagated
+            # the fill cloid yet, a nearly full exchange position is sufficient
+            # evidence for an IOC; a clearly partial position remains OPEN.
+            full = filled_total >= order.quantity * Decimal("0.99")
+            if not matching:
+                full = live.size >= order.quantity * Decimal("0.90")
+            if not full:
+                return
+            order.status = OrderStatus.FILLED.value
+            if matching:
+                for fill in matching:
+                    await self._record_fill(
+                        session,
+                        order,
+                        fill.price,
+                        fill.quantity,
+                        fill_id=getattr(fill, "fill_id", None),
+                    )
+            else:
+                # Position confirmation is the exchange truth when the fill
+                # event has not arrived; preserve an auditable local fill.
+                await self._record_fill(
+                    session,
+                    order,
+                    live.entry_price or Decimal("0"),
+                    live.size,
+                )
+            await session.commit()
+        except Exception:
+            # This is a confirmation enhancement, never permission to infer a
+            # fill after a failed query. The original OPEN status remains and
+            # the normal recovery/reconciliation path retains the safety gate.
+            logger.exception("market open finalization query failed")
+
+    async def _finalize_confirmed_market_close(self, session: AsyncSession, order: Order) -> None:
+        """Resolve an IOC close reported OPEN after exchange position confirms FLAT.
+
+        A reduce-only market close can receive the same immediate OPEN
+        acknowledgement as an open.  Once the exchange position is FLAT, the
+        close is complete and must not remain as a local open order that would
+        poison the next pre-open guard.
+        """
+        if order.order_type != OrderType.MARKET.value or order.status != OrderStatus.OPEN.value:
+            return
+        try:
+            live = await self._execution.get_position(order.symbol)
+            if live.side != PositionSide.FLAT or live.size > 0:
+                return
+            fills = await self._execution.get_fills()
+            matching = [item for item in fills if item.cloid == order.cloid]
+            filled_total = sum((item.quantity for item in matching), Decimal("0"))
+            if filled_total < order.quantity * Decimal("0.99"):
+                return
+            order.status = OrderStatus.FILLED.value
+            for fill in matching:
+                await self._record_fill(
+                    session,
+                    order,
+                    fill.price,
+                    fill.quantity,
+                    fill_id=getattr(fill, "fill_id", None),
+                )
+            await session.commit()
+        except Exception:
+            # A failed confirmation query must retain the original OPEN state
+            # and let normal reconciliation keep the safety gate closed.
+            logger.exception("market close finalization query failed")
 
     async def _reconcile_unknown(self, session: AsyncSession, order: Order) -> None:
         """Query-only. Never calls place_order. Absence of an open order is not enough."""
@@ -440,7 +789,11 @@ class TradingController:
                         fill_id=getattr(fill, "fill_id", None),
                     )
             await session.commit()
-            await self._sync_exchange_mirror(session, order.symbol)
+            synced = await self._sync_exchange_mirror(session, order.symbol)
+            if not synced:
+                await self._recovery.enter_recovery(session, "unknown_reconciliation_sync_failed")
+                await session.commit()
+                return
             await self._maybe_leave_recovery(session)
             await self._emit(session, "order", {"cloid": order.cloid, "status": order.status})
             return
@@ -540,13 +893,13 @@ class TradingController:
             await trades.add(trade)
             await session.commit()
 
-    async def _sync_exchange_mirror(self, session: AsyncSession, symbol: str) -> None:
+    async def _sync_exchange_mirror(self, session: AsyncSession, symbol: str) -> bool:
         # Exchange State > Local DB
         try:
             view = await self._execution.get_position(symbol)
             balance = await self._execution.get_balance()
         except Exception:
-            return
+            return False
         await PositionRepository(session).upsert_mirror(
             symbol, view.side, view.size, view.entry_price, view.unrealized_pnl
         )
@@ -557,24 +910,29 @@ class TradingController:
             "position",
             {"symbol": symbol, "side": view.side.value, "size": str(view.size)},
         )
+        return True
 
     async def _local_side(self, session: AsyncSession, symbol: str) -> PositionSide:
-        row = await PositionRepository(session).get(symbol)
+        row = await PositionRepository(session).get_or_none(symbol)
+        if row is None:
+            return PositionSide.UNKNOWN
         return PositionSide(row.side)
 
     async def _size_from_settings(self, session: AsyncSession) -> Decimal:
         settings = await SettingsRepository(session).get()
-        try:
-            market = await self._execution.get_market_data(settings.trading_pair)
-            mid = market.get("mid", Decimal("100"))
-            balance = await self._execution.get_balance()
-            notional = balance.equity * (settings.position_percentage / Decimal("100"))
-            qty = notional / mid if mid else Decimal("0.001")
-            return qty.quantize(Decimal("0.0001"))
-        except Exception:
-            return Decimal("0.001")
+        market = await self._execution.get_market_data(settings.trading_pair)
+        mid = Decimal(str(market.get("mid", "0")))
+        if mid <= 0:
+            raise ValueError("mid price unavailable")
+        balance = await self._execution.get_balance()
+        notional = balance.equity * (settings.position_percentage / Decimal("100"))
+        if notional <= 0:
+            raise ValueError("notional from settings is not positive")
+        # Tick/step/min-notional are applied by Hummingbot Connector quantization in the Worker.
+        return notional / mid
 
-    async def _cancel_opening_orders(self, session: AsyncSession) -> None:
+    async def _cancel_opening_orders(self, session: AsyncSession) -> bool:
+        canceled = True
         for order in await OrderRepository(session).list_open():
             if order.reduce_only:
                 continue
@@ -583,22 +941,27 @@ class TradingController:
                 viewed = await self._execution.cancel_order(order.cloid, request_id)
             except Exception:
                 order.status = OrderStatus.UNKNOWN.value
+                canceled = False
                 continue
             if viewed:
                 order.status = viewed.status.value
         await session.commit()
+        return canceled
 
-    async def _cancel_all_orders(self, session: AsyncSession) -> None:
+    async def _cancel_all_orders(self, session: AsyncSession) -> bool:
+        canceled = True
         for order in await OrderRepository(session).list_open():
             request_id = new_id()
             try:
                 viewed = await self._execution.cancel_order(order.cloid, request_id)
             except Exception:
                 order.status = OrderStatus.UNKNOWN.value
+                canceled = False
                 continue
             if viewed:
                 order.status = viewed.status.value
         await session.commit()
+        return canceled
 
     async def _emit(self, session: AsyncSession, event_type: str, payload: dict) -> None:
         event = await EventRepository(session).add(event_type, json.dumps(payload, default=str))

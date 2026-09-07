@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from decimal import Decimal
 import json
@@ -20,17 +21,21 @@ from app.execution.protocol import (
 class HttpExecutionClient:
     """Talks to execution-worker over HTTP. Backend never imports Hummingbot objects."""
 
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 10.0, read_timeout: float = 2.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._read_timeout = read_timeout
 
     def _client(self, timeout: float | None = None) -> httpx.AsyncClient:
         # Internal worker RPC must not follow HTTP(S)_PROXY.
         return httpx.AsyncClient(timeout=self._timeout if timeout is None else timeout, trust_env=False)
 
+    def _read_client(self) -> httpx.AsyncClient:
+        return self._client(timeout=self._read_timeout)
+
     async def health(self) -> bool:
         try:
-            async with self._client() as client:
+            async with self._read_client() as client:
                 response = await client.get(f"{self._base_url}/health")
             return response.status_code == 200
         except httpx.HTTPError:
@@ -38,7 +43,7 @@ class HttpExecutionClient:
 
     async def is_ready(self) -> bool:
         try:
-            async with self._client() as client:
+            async with self._read_client() as client:
                 response = await client.get(f"{self._base_url}/health")
             if response.status_code != 200:
                 return False
@@ -51,7 +56,7 @@ class HttpExecutionClient:
 
     async def worker_status(self) -> dict:
         try:
-            async with self._client() as client:
+            async with self._read_client() as client:
                 response = await client.get(f"{self._base_url}/health")
             if response.status_code != 200:
                 return {"ready": False, "worker_state": "NOT_READY"}
@@ -60,22 +65,36 @@ class HttpExecutionClient:
             return {"ready": False, "worker_state": "NOT_READY"}
 
     async def configure(self, trading_pair: str, slippage, leverage: int) -> None:
-        async with self._client() as client:
-            response = await client.post(
-                f"{self._base_url}/rpc/configure",
-                json={
-                    "trading_pair": trading_pair,
-                    "slippage": str(slippage),
-                    "leverage": leverage,
-                },
-            )
-            if response.status_code == 404:
+        for attempt in range(2):
+            try:
+                async with self._client() as client:
+                    response = await client.post(
+                        f"{self._base_url}/rpc/configure",
+                        json={
+                            "trading_pair": trading_pair,
+                            "slippage": str(slippage),
+                            "leverage": leverage,
+                        },
+                    )
+                    if response.status_code == 404:
+                        return
+                    response.raise_for_status()
                 return
-            response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if attempt == 0 and exc.response.status_code == 403:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+        raise RuntimeError("unreachable configure retry state")
 
     async def connect(self) -> None:
         async with self._client() as client:
             response = await client.post(f"{self._base_url}/rpc/connect")
+            response.raise_for_status()
+
+    async def heartbeat(self) -> None:
+        async with self._client() as client:
+            response = await client.post(f"{self._base_url}/rpc/heartbeat")
             response.raise_for_status()
 
     async def disconnect(self) -> None:
@@ -84,32 +103,58 @@ class HttpExecutionClient:
             response.raise_for_status()
 
     async def get_balance(self) -> BalanceView:
-        async with self._client() as client:
-            response = await client.get(f"{self._base_url}/rpc/balance")
-            response.raise_for_status()
-        return BalanceView.model_validate(response.json())
+        for attempt in range(2):
+            try:
+                async with self._read_client() as client:
+                    response = await client.get(f"{self._base_url}/rpc/balance")
+                    response.raise_for_status()
+                return BalanceView.model_validate(response.json())
+            except httpx.HTTPStatusError as exc:
+                if attempt == 0 and exc.response.status_code >= 500:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+            except httpx.TransportError:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+        raise RuntimeError("unreachable balance retry state")
 
     async def get_positions(self) -> list[PositionView]:
-        async with self._client() as client:
+        async with self._read_client() as client:
             response = await client.get(f"{self._base_url}/rpc/positions")
             response.raise_for_status()
         return [PositionView.model_validate(item) for item in response.json()]
 
     async def get_position(self, symbol: str) -> PositionView:
-        async with self._client() as client:
-            response = await client.get(f"{self._base_url}/rpc/position", params={"symbol": symbol})
-            response.raise_for_status()
-        return PositionView.model_validate(response.json())
+        for attempt in range(2):
+            try:
+                async with self._read_client() as client:
+                    response = await client.get(f"{self._base_url}/rpc/position", params={"symbol": symbol})
+                    response.raise_for_status()
+                return PositionView.model_validate(response.json())
+            except httpx.HTTPStatusError as exc:
+                if attempt == 0 and exc.response.status_code >= 500:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+            except httpx.TransportError:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+        raise RuntimeError("unreachable position retry state")
 
     async def get_open_orders(self, symbol: str | None = None) -> list[OrderView]:
         params = {"symbol": symbol} if symbol else None
-        async with self._client() as client:
+        async with self._read_client() as client:
             response = await client.get(f"{self._base_url}/rpc/open_orders", params=params)
             response.raise_for_status()
         return [OrderView.model_validate(item) for item in response.json()]
 
     async def get_order(self, cloid: str) -> OrderView | None:
-        async with self._client() as client:
+        async with self._read_client() as client:
             response = await client.get(f"{self._base_url}/rpc/order/{cloid}")
             if response.status_code == 404:
                 return None
@@ -117,7 +162,7 @@ class HttpExecutionClient:
         return OrderView.model_validate(response.json())
 
     async def get_fills(self) -> list[FillView]:
-        async with self._client() as client:
+        async with self._read_client() as client:
             response = await client.get(f"{self._base_url}/rpc/fills")
             response.raise_for_status()
         return [FillView.model_validate(item) for item in response.json()]
@@ -151,11 +196,33 @@ class HttpExecutionClient:
         return OrderView.model_validate(response.json())
 
     async def get_market_data(self, symbol: str) -> dict[str, Decimal]:
-        async with self._client() as client:
+        async with self._read_client() as client:
             response = await client.get(f"{self._base_url}/rpc/market_data", params={"symbol": symbol})
             response.raise_for_status()
         data = response.json()
         return {key: Decimal(str(value)) for key, value in data.items()}
+
+    async def get_candles(self, symbol: str, interval: str, limit: int = 200) -> list[dict]:
+        for attempt in range(2):
+            try:
+                async with self._read_client() as client:
+                    response = await client.get(
+                        f"{self._base_url}/rpc/candles",
+                        params={"symbol": symbol, "interval": interval, "limit": limit},
+                    )
+                    response.raise_for_status()
+                return list(response.json())
+            except httpx.HTTPStatusError as exc:
+                if attempt == 0 and exc.response.status_code >= 500:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+            except httpx.TransportError:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
+        raise RuntimeError("unreachable candle retry state")
 
     async def stream_events(self) -> AsyncIterator[dict]:
         async with self._client(timeout=None) as client:

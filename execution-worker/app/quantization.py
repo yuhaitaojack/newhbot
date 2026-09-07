@@ -1,3 +1,10 @@
+"""Characterization of Hummingbot v2.16.0 Hyperliquid quantize formulas.
+
+Production HyperliquidExecutionAdapter does not import this module. FakeConnector
+uses it as the stand-in for Connector.quantize_order_price / amount. Live
+production must call Hummingbot Connector quantize methods.
+"""
+
 from __future__ import annotations
 
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
@@ -58,6 +65,9 @@ def normalize_order_request(request: PlaceOrderRequest, meta: InstrumentMeta, pr
     px = quantize_order_price(price, meta.tick_size)
     notional = qty * px
     min_notional = meta.min_notional if meta.min_notional > 0 else MIN_NOTIONAL_SIZE
-    if notional < min_notional:
+    # A reduce-only order may be smaller than the normal entry minimum. This
+    # is required to close a partially filled position whose remaining
+    # notional has fallen below the exchange's entry threshold.
+    if not request.reduce_only and notional < min_notional:
         raise QuantizeReject(f"notional {notional} below minimum {min_notional}")
     return request.model_copy(update={"quantity": qty, "price": px})

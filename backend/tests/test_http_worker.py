@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -28,6 +33,203 @@ class CountingHttpExecutionClient(HttpExecutionClient):
     async def place_order(self, request):
         self.place_calls += 1
         return await super().place_order(request)
+
+
+def test_settings_configure_worker_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_WORKER_READ_TIMEOUT_SECONDS", "12.5")
+
+    settings = Settings()
+
+    assert settings.execution_worker_read_timeout_seconds == 12.5
+
+
+@pytest.mark.asyncio
+async def test_http_worker_retries_transient_candle_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("GET", "http://worker/rpc/candles")
+    responses = [
+        httpx.Response(500, request=request),
+        httpx.Response(200, json=[{"timestamp": 1}], request=request),
+    ]
+
+    class _FakeReadClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return responses.pop(0)
+
+    execution = HttpExecutionClient("http://worker")
+    monkeypatch.setattr(execution, "_read_client", lambda: _FakeReadClient())
+
+    assert await execution.get_candles("BTC-USD", "5m", 200) == [{"timestamp": 1}]
+    assert responses == []
+
+
+@pytest.mark.asyncio
+async def test_http_worker_retries_transient_balance_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("GET", "http://worker/rpc/balance")
+    responses = [
+        httpx.Response(500, request=request),
+        httpx.Response(200, json={"equity": "1000", "available": "900", "margin_used": "100"}, request=request),
+    ]
+
+    class _FakeReadClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return responses.pop(0)
+
+    execution = HttpExecutionClient("http://worker")
+    monkeypatch.setattr(execution, "_read_client", lambda: _FakeReadClient())
+
+    balance = await execution.get_balance()
+    assert balance.available == Decimal("900")
+    assert responses == []
+
+
+@pytest.mark.asyncio
+async def test_http_worker_retries_transient_position_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("GET", "http://worker/rpc/position")
+    responses = [
+        httpx.Response(503, request=request),
+        httpx.Response(
+            200,
+            json={
+                "symbol": "BTC-USD",
+                "side": "FLAT",
+                "size": "0",
+                "entry_price": None,
+                "unrealized_pnl": "0",
+            },
+            request=request,
+        ),
+    ]
+
+    class _FakeReadClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return responses.pop(0)
+
+    execution = HttpExecutionClient("http://worker")
+    monkeypatch.setattr(execution, "_read_client", lambda: _FakeReadClient())
+
+    position = await execution.get_position("BTC-USD")
+    assert position.side == PositionSide.FLAT
+    assert responses == []
+
+
+@pytest.mark.asyncio
+async def test_http_worker_retries_transient_configure_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("POST", "http://worker/rpc/configure")
+    responses = [httpx.Response(403, request=request), httpx.Response(200, json={"ok": True}, request=request)]
+
+    class _FakeWriteClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return responses.pop(0)
+
+    execution = HttpExecutionClient("http://worker")
+    monkeypatch.setattr(execution, "_client", lambda: _FakeWriteClient())
+
+    await execution.configure("BTC-USD", Decimal("0.01"), 1)
+    assert responses == []
+
+
+class _DelayedReadHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/health":
+            payload = {
+                "ready": True,
+                "worker_state": "READY",
+                "mode": "mock",
+                "execution_enabled": False,
+                "sync_status": "SYNCED",
+            }
+        elif path == "/rpc/position":
+            time.sleep(self.server.response_delay)  # type: ignore[attr-defined]
+            payload = {
+                "symbol": "BTC-USD",
+                "side": "FLAT",
+                "size": "0",
+                "entry_price": None,
+                "unrealized_pnl": "0",
+            }
+        elif path == "/rpc/balance":
+            payload = {"equity": "1000", "available": "1000", "margin_used": "0"}
+        else:
+            self.send_error(404)
+            return
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+@contextmanager
+def _delayed_read_worker(delay_seconds: float):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DelayedReadHandler)
+    server.response_delay = delay_seconds  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_configured_read_timeout_allows_slow_status_query(tmp_path) -> None:
+    with _delayed_read_worker(2.2) as url:
+        settings = Settings(
+            database_url=f"sqlite+aiosqlite:///{(tmp_path / 'slow-read.db').as_posix()}",
+            execution_worker_url=url,
+            execution_worker_read_timeout_seconds=3.5,
+            execution_mode="mock",
+            cors_origins="http://test",
+            strategies_dir=str(tmp_path / "strategy-versions"),
+        )
+        app = create_app(settings=settings, bootstrap_schema=True)
+        started = time.monotonic()
+        with TestClient(app) as client:
+            status = client.get("/api/status")
+        elapsed = time.monotonic() - started
+
+    assert status.status_code == 200
+    assert status.json()["system_state"] == "STOPPED"
+    assert status.json()["position"]["side"] == PositionSide.FLAT.value
+    assert elapsed >= 2.0
 
 
 def _free_port() -> int:

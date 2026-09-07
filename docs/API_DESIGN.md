@@ -2,11 +2,20 @@
 
 Prefix: `/api`. UI reconnect: `GET /api/status` snapshot + `/ws` incremental events.
 
+Mutating `/api` requests in non-mock mode require `Authorization: Bearer <CONTROL_API_TOKEN>`.
+In the Docker Compose frontend, Nginx injects this header from its runtime environment; the token is not compiled into browser JavaScript.
+Mock mode intentionally permits local development without a token. The token is an environment secret, not a trading setting.
+
+For authenticated read-only verification, use `docker-compose.live-readonly.example.yml` together with the local
+`scripts/live_readonly_preflight.ps1`; it must keep `EXECUTION_ENABLED=false`.
+
 ## Control plane (backend)
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | /health | Includes worker health |
+| GET | /preflight | Read-only live readiness report; never arms, configures, or submits |
+| GET | /market/candles | Read-only OHLCV source via Worker; strategy loop consumer only |
 | GET | /status | Snapshot for UI reconnect |
 | GET/PUT | /settings | SQLite persisted trading settings |
 | GET | /strategy | Active strategy + parameters (`effective_value`) |
@@ -16,12 +25,17 @@ Prefix: `/api`. UI reconnect: `GET /api/status` snapshot + `/ws` incremental eve
 | GET | /fills | |
 | GET | /trades | |
 | GET | /events | |
+| POST | /strategy/tick | Mock-only: evaluate one supplied snapshot, then route through Controller |
+| GET | /strategy/loop | Loop status; does not start the loop |
+| POST | /strategy/loop/start | Explicitly start supervised strategy loop |
+| POST | /strategy/loop/stop | Stop supervised strategy loop |
 | POST | /trading/start | Controller.start |
 | POST | /trading/stop | Cancels opening orders, does not close |
 | POST | /trading/close-and-stop | |
 | POST | /trading/close-and-continue | |
 | POST | /trading/emergency-stop | Latches estop |
-| POST | /trading/signal | Dev helper; production runtime will be internal |
+| POST | /trading/clear-estop | Query-only unlatch; refuses unless FLAT / no open or UNKNOWN orders |
+| POST | /trading/signal | Mock-only dev helper; production runtime is the strategy signal source |
 
 Trading routes call `TradingController` only. They do not call Execution Worker.
 
@@ -54,6 +68,7 @@ Not published to the public internet in Compose (`expose` only). Every place req
 | POST | /rpc/place_order | |
 | POST | /rpc/cancel_order | |
 | GET | /rpc/market_data?symbol= | |
+| GET | /rpc/candles?symbol=&interval=&limit= | Read-only Hyperliquid `candleSnapshot` bridge |
 | GET | /rpc/stream_events | |
 | POST | /rpc/test/behavior | Mock-only test hook |
 | POST | /rpc/test/query_fail | Mock-only test hook |

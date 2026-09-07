@@ -62,3 +62,23 @@ def test_map_order_and_fill_from_hummingbot_shaped_payloads() -> None:
     assert fill.symbol == "BTC-USD"
     assert order.cloid.startswith("0x")
     assert len(order.cloid) == 34
+
+
+def test_hummingbot_failed_maps_to_business_unknown_not_rejected() -> None:
+    """HB FAILED/lost is not permission to open again. Controller treats UNKNOWN as unresolved."""
+    from app.mapping import map_market_event_kind
+
+    failed = map_hummingbot_order(
+        {"status": "failed", "order": {"oid": 1, "cloid": "0x" + "f" * 32, "coin": "BTC", "side": "B", "sz": "0"}},
+        configured_pair="BTC-USD",
+    )
+    assert failed.status == OrderStatus.UNKNOWN
+    assert failed.status != OrderStatus.REJECTED
+    assert map_market_event_kind("OrderFailure") == "order_failure"
+    assert map_market_event_kind("OrderUpdate") == "order_update"
+    assert map_market_event_kind("TradeUpdate") == "trade_update"
+    assert map_market_event_kind("OrderFilled") == "fill"
+    assert map_market_event_kind("OrderCancelled") == "order_canceled"
+    assert map_market_event_kind("BuyOrderCompleted") == "order_completed"
+    assert map_market_event_kind("SellOrderCompleted") == "order_completed"
+    assert map_market_event_kind("NotARealEvent") == "unknown_event"

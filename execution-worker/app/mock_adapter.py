@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
@@ -103,6 +104,42 @@ class MockExecutionAdapter:
     async def get_market_data(self, symbol: str) -> dict[str, Decimal]:
         _ = symbol
         return {"mid": self.mid, "bid": self.mid - Decimal("0.1"), "ask": self.mid + Decimal("0.1")}
+
+    async def get_candles(self, symbol: str, interval: str, limit: int = 200) -> list[dict]:
+        _ = symbol
+        step_by_unit = {
+            "s": 1_000,
+            "m": 60_000,
+            "h": 3_600_000,
+            "d": 86_400_000,
+            "M": 2_592_000_000,
+        }
+        if not interval or interval[-1] not in step_by_unit:
+            raise ValueError("unsupported candle interval")
+        try:
+            step_ms = int(interval[:-1]) * step_by_unit[interval[-1]]
+        except (TypeError, ValueError):
+            raise ValueError("unsupported candle interval") from None
+        if step_ms <= 0:
+            raise ValueError("unsupported candle interval")
+
+        count = max(0, int(limit))
+        if count == 0:
+            return []
+        now_ms = int(time.time() * 1_000)
+        last_timestamp = now_ms - (now_ms % step_ms)
+        price = self.mid
+        return [
+            {
+                "timestamp": last_timestamp - step_ms * (count - index - 1),
+                "open": str(price),
+                "high": str(price),
+                "low": str(price),
+                "close": str(price),
+                "volume": "0",
+            }
+            for index in range(count)
+        ]
 
     async def place_order(self, request: PlaceOrderRequest) -> PlaceOrderResponse:
         if not self.connected:

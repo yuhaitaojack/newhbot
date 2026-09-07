@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.enums import OrderStatus, PositionSide
 
 
@@ -17,15 +19,52 @@ def test_settings_persist_roundtrip(app_client) -> None:
     assert again.json()["trading_pair"] == "ETH-USD"
 
 
+def test_settings_cannot_change_while_running(app_client) -> None:
+    client, _, _ = app_client
+    before = client.get("/api/settings").json()
+    assert client.post("/api/trading/start").json()["ok"] is True
+
+    rejected = client.put("/api/settings", json={"leverage": 7, "trading_pair": "ETH-USD"})
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "settings can only be changed while trading is STOPPED"
+
+    after = client.get("/api/settings").json()
+    assert after["leverage"] == before["leverage"]
+    assert after["trading_pair"] == before["trading_pair"]
+    assert client.post("/api/trading/stop").json()["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"trading_pair": "BTC/USD"},
+        {"position_percentage": "0"},
+        {"position_percentage": "100.1"},
+        {"order_type": "UNKNOWN"},
+        {"limit_timeout": 0},
+        {"limit_timeout": 86401},
+        {"slippage": "-0.01"},
+        {"slippage": "1"},
+    ],
+)
+def test_invalid_settings_are_rejected_before_persistence(app_client, payload) -> None:
+    client, _, _ = app_client
+    before = client.get("/api/settings").json()
+    response = client.put("/api/settings", json=payload)
+    assert response.status_code == 422
+    after = client.get("/api/settings").json()
+    assert after == before
+
+
 def test_strategy_parameter_effective_value_in_api(app_client) -> None:
     client, _, _ = app_client
     response = client.get("/api/strategy")
     assert response.status_code == 200
     params = response.json()["parameters"]
     assert params
-    lookback = next(item for item in params if item["name"] == "lookback")
-    assert lookback["enabled"] is False
-    assert lookback["effective_value"] == lookback["default_value"]
+    ema_period = next(item for item in params if item["name"] == "ema_period")
+    assert ema_period["enabled"] is False
+    assert ema_period["effective_value"] == ema_period["default_value"]
 
 
 def test_health_and_status(app_client) -> None:
@@ -194,4 +233,58 @@ def test_worker_not_ready_blocks_open(app_client) -> None:
     fake.ready_flag = False
     blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
     assert blocked.json()["accepted"] is False
+    assert blocked.json()["reason"] == "execution worker not READY; recovery required"
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
+    assert fake.place_calls == 0
+
+
+def test_worker_unreachable_enters_recovery_before_open(app_client) -> None:
+    client, _, fake = app_client
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+    fake.healthy = False
+    blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert blocked.json()["accepted"] is False
+    assert blocked.json()["reason"] == "execution worker unreachable; recovery required"
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
+    assert fake.place_calls == 0
+
+
+def test_worker_status_query_failure_enters_recovery_before_open(app_client) -> None:
+    client, _, fake = app_client
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+    fake.health_error = True
+    blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert blocked.json()["accepted"] is False
+    assert blocked.json()["reason"] == "execution worker status query failed; recovery required"
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
+    assert fake.place_calls == 0
+
+
+def test_worker_ready_query_failure_enters_recovery_before_open(app_client) -> None:
+    client, _, fake = app_client
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+    fake.ready_error = True
+    blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert blocked.json()["accepted"] is False
+    assert blocked.json()["reason"] == "execution worker status query failed; recovery required"
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
+    assert fake.place_calls == 0
+
+
+def test_open_size_query_failure_enters_recovery_without_order(app_client) -> None:
+    client, _, fake = app_client
+    start = client.post("/api/trading/start")
+    assert start.json()["ok"] is True
+
+    async def fail_size(*args, **kwargs):
+        raise TimeoutError("fake size query failed")
+
+    client.app.state.container.controller._size_from_settings = fail_size
+    blocked = client.post("/api/trading/signal", json={"signal": "LONG"})
+    assert blocked.json()["accepted"] is False
+    assert blocked.json()["reason"] == "size unavailable: TimeoutError"
+    assert client.get("/api/status").json()["system_state"] == "RECOVERY"
     assert fake.place_calls == 0

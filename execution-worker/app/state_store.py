@@ -5,7 +5,12 @@ from app.protocol import OrderStatus, PositionSide
 
 
 class ExchangeStateStore:
-    """REST snapshot plus WebSocket increments. Exchange state outranks local memory on conflict."""
+    """TEST HELPER ONLY. Not used on the production Adapter path.
+
+    STEP 2 execution-layer truth is the Connector (account_positions /
+    in_flight_orders / fills). Do not reintroduce this store as a second
+    exchange state source.
+    """
 
     def __init__(self) -> None:
         self.positions: dict[str, ExchangePosition] = {}

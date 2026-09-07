@@ -141,6 +141,49 @@ def test_guard_rejects_unknown_and_recovery() -> None:
     assert recovery.allowed is False
 
 
+def test_guard_rejects_unknown_position_side() -> None:
+    guard = PositionGuard()
+    exchange_unknown = guard.can_open_position(
+        GuardInput(
+            local_side=PositionSide.FLAT,
+            exchange_side=PositionSide.UNKNOWN,
+            has_unknown_orders=False,
+            system_state=SystemState.RUNNING,
+            configured_pair="BTC-USD",
+            target_pair="BTC-USD",
+            exchange_connected=True,
+        )
+    )
+    local_unknown = guard.can_open_position(
+        GuardInput(
+            local_side=PositionSide.UNKNOWN,
+            exchange_side=PositionSide.FLAT,
+            has_unknown_orders=False,
+            system_state=SystemState.RUNNING,
+            configured_pair="BTC-USD",
+            target_pair="BTC-USD",
+            exchange_connected=True,
+        )
+    )
+    disconnected = guard.can_open_position(
+        GuardInput(
+            local_side=PositionSide.FLAT,
+            exchange_side=PositionSide.FLAT,
+            has_unknown_orders=False,
+            system_state=SystemState.RUNNING,
+            configured_pair="BTC-USD",
+            target_pair="BTC-USD",
+            exchange_connected=False,
+        )
+    )
+    assert exchange_unknown.allowed is False
+    assert exchange_unknown.reason == "position side is UNKNOWN"
+    assert local_unknown.allowed is False
+    assert local_unknown.reason == "position side is UNKNOWN"
+    assert disconnected.allowed is False
+    assert disconnected.reason == "exchange connection unavailable"
+
+
 def test_guard_rejects_exchange_not_flat() -> None:
     guard = PositionGuard()
     result = guard.can_open_position(
@@ -155,6 +198,42 @@ def test_guard_rejects_exchange_not_flat() -> None:
         )
     )
     assert result.allowed is False
+
+
+def test_guard_rejects_foreign_positions() -> None:
+    guard = PositionGuard()
+    result = guard.can_open_position(
+        GuardInput(
+            local_side=PositionSide.FLAT,
+            exchange_side=PositionSide.FLAT,
+            has_unknown_orders=False,
+            system_state=SystemState.RUNNING,
+            configured_pair="BTC-USD",
+            target_pair="BTC-USD",
+            exchange_connected=True,
+            has_foreign_positions=True,
+        )
+    )
+    assert result.allowed is False
+    assert result.reason == "FOREIGN_SYMBOL_POSITION"
+
+
+def test_guard_exchange_long_beats_local_flat() -> None:
+    """SQLite FLAT must not override Connector LONG. Opens stay forbidden."""
+    guard = PositionGuard()
+    result = guard.can_open_position(
+        GuardInput(
+            local_side=PositionSide.FLAT,
+            exchange_side=PositionSide.LONG,
+            has_unknown_orders=False,
+            system_state=SystemState.RUNNING,
+            configured_pair="BTC-USD",
+            target_pair="BTC-USD",
+            exchange_connected=True,
+        )
+    )
+    assert result.allowed is False
+    assert "exchange position" in result.reason
 
 
 def test_decimal_size_placeholder() -> None:

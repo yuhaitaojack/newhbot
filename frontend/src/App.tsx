@@ -1,12 +1,12 @@
 import { NavLink, Outlet } from "react-router-dom";
 
 const links = [
-  ["/", "Dashboard"],
-  ["/settings", "Settings"],
-  ["/strategy", "Strategy"],
-  ["/orders", "Orders"],
-  ["/trades", "Trades"],
-  ["/events", "Events"],
+  ["/", "仪表盘"],
+  ["/settings", "交易设置"],
+  ["/strategy", "策略管理"],
+  ["/orders", "订单记录"],
+  ["/trades", "成交记录"],
+  ["/events", "系统事件"],
 ];
 
 export function App() {

@@ -11,7 +11,10 @@ HB_ORDER_STATE = {
     "resting": OrderStatus.OPEN,
     "filled": OrderStatus.FILLED,
     "canceled": OrderStatus.CANCELED,
+    "cancelled": OrderStatus.CANCELED,
     "rejected": OrderStatus.REJECTED,
+    "failed": OrderStatus.UNKNOWN,
+    "failure": OrderStatus.UNKNOWN,
     "badAloPxRejected": OrderStatus.REJECTED,
     "minTradeNtlRejected": OrderStatus.REJECTED,
     "reduceOnlyCanceled": OrderStatus.CANCELED,
@@ -22,6 +25,26 @@ HB_ORDER_STATE = {
     "delistedCanceled": OrderStatus.CANCELED,
     "liquidatedCanceled": OrderStatus.CANCELED,
 }
+
+# v2.16.0 MarketEvent names → internal DTO kind. Subscribe via connector.add_listener.
+# Do not treat OrderFailure as permission to open a new position.
+HB_MARKET_EVENT_TO_KIND = {
+    "OrderFilled": "fill",
+    "BuyOrderCompleted": "order_completed",
+    "SellOrderCompleted": "order_completed",
+    "OrderCancelled": "order_canceled",
+    "OrderFailure": "order_failure",
+    "OrderUpdate": "order_update",
+    "TradeUpdate": "trade_update",
+}
+
+
+def map_market_event_kind(event_name: str) -> str:
+    """Thin name map only. Not an event state machine."""
+    kind = HB_MARKET_EVENT_TO_KIND.get(str(event_name))
+    if kind is None:
+        return "unknown_event"
+    return kind
 
 
 class OneWayError(ValueError):

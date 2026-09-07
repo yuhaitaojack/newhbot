@@ -67,3 +67,17 @@ def test_normalize_rejects_below_min_and_notional() -> None:
     out = normalize_order_request(ok, meta, Decimal("100"))
     assert out.quantity == Decimal("0.2")
     assert out.price == Decimal("100.00") or out.price == Decimal("100")
+
+
+def test_reduce_only_allows_below_entry_minimum() -> None:
+    request = PlaceOrderRequest(
+        request_id="close-r",
+        cloid="0x" + "4" * 32,
+        symbol="BTC-USD",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        quantity=Decimal("0.001"),
+        reduce_only=True,
+    )
+    out = normalize_order_request(request, _meta(), Decimal("100"))
+    assert out.quantity == Decimal("0.001")

@@ -1,0 +1,43 @@
+name: ema5break
+version: "1"
+symbol: BTC-USD
+interval: 5m
+expected_leverage: 3
+max_positions: 1
+description: >
+  BTC perp, 5m. One position. LONG on bullish engulfing with close above EMA5.
+  SHORT on bearish engulfing with close below EMA5. Stop 2*ATR, TP 1.5R.
+  Emits LONG/SHORT/CLOSE/HOLD only. Never places orders or sets leverage.
+parameters:
+  - name: ema_period
+    type: int
+    default: 5
+    min: 2
+    max: 50
+    description: EMA length for the close filter
+  - name: atr_period
+    type: int
+    default: 14
+    min: 2
+    max: 50
+    description: ATR lookback
+  - name: atr_stop_mult
+    type: float
+    default: 2.0
+    min: 0.5
+    max: 10
+    description: Stop distance in ATR multiples
+  - name: tp_rr
+    type: float
+    default: 1.5
+    min: 0.5
+    max: 5
+    description: Take-profit as a multiple of stop distance
+  - name: interval
+    type: string
+    default: "5m"
+    description: Expected bar interval (informational)
+  - name: symbol
+    type: string
+    default: "BTC-USD"
+    description: Expected trading pair (informational)

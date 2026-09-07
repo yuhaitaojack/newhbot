@@ -22,6 +22,8 @@ credentials/
 !/data/.gitkeep
 /logs/*
 !/logs/.gitkeep
+/backend/logs/*
+!/backend/logs/.gitkeep
 backend/data/
 *.log
 pytest-cache-files*/
@@ -67,3 +69,6 @@ Thumbs.db
 # Hummingbot runtime dumps
 hummingbot_logs/
 conf/connectors/
+
+# Uploaded strategy versions (content-addressed; never overwrite live entrypoints)
+/strategies/versions/

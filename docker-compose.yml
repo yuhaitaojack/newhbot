@@ -1,19 +1,25 @@
-# Compose V2. Relative bind mounts work on Windows Docker Desktop.
-# Strategy Runtime stays in-process in the backend container (PHASE 2).
-# Future sandbox: add a strategy-runtime service that speaks the same
-# StrategyRuntime.evaluate() interface; do not let it call execution-worker.
+# Worker is the Hummingbot v2.16.0 connector runtime (Python 3.13.14 in the official image).
+# EXECUTION_ENABLED stays false. ReadOnlyGuard blocks place/cancel/leverage.
+# Strategy Runtime uses a restricted subprocess inside the backend container
+# for local mock ticks (PHASE 8). It must never call execution-worker directly.
 
 services:
   execution-worker:
+    # Hummingbot v2.16.0 official image is linux/amd64. Docker Desktop
+    # provides the documented amd64 emulation path on Apple Silicon.
+    platform: linux/amd64
     build:
       context: ./execution-worker
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       LOG_LEVEL: INFO
+      # Local Compose is an offline-safe mock stack. Hyperliquid is enabled
+      # only through the explicit live-readonly override.
       EXECUTION_MODE: mock
       EXECUTION_ENABLED: "false"
       HUMMINGBOT_VERSION: v2.16.0
+      BACKEND_HEARTBEAT_TIMEOUT_SECONDS: "30"
     volumes:
       - ./logs:/app/logs
     expose:
@@ -31,6 +37,8 @@ services:
       LOG_LEVEL: INFO
       DATABASE_URL: sqlite+aiosqlite:///./data/newhbot.db
       EXECUTION_WORKER_URL: http://execution-worker:8001
+      EXECUTION_WORKER_WRITE_TIMEOUT_SECONDS: ${EXECUTION_WORKER_WRITE_TIMEOUT_SECONDS:-60}
+      EXECUTION_WORKER_READ_TIMEOUT_SECONDS: ${EXECUTION_WORKER_READ_TIMEOUT_SECONDS:-10}
       EXECUTION_MODE: mock
       EXECUTION_ENABLED: "false"
       CORS_ORIGINS: http://127.0.0.1:8080,http://localhost:8080
@@ -48,5 +56,10 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      # Keep Nginx variables such as $http_upgrade intact; only substitute the
+      # optional runtime control token into proxy headers.
+      NGINX_ENVSUBST_FILTER: "^CONTROL_API_TOKEN$"
+      CONTROL_API_TOKEN: ""
     ports:
       - "127.0.0.1:8080:80"

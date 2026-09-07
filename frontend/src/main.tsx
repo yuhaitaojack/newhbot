@@ -15,9 +15,9 @@ const router = createBrowserRouter([
       { index: true, element: <DashboardPage /> },
       { path: "settings", element: <SettingsPage /> },
       { path: "strategy", element: <StrategyPage /> },
-      { path: "orders", element: <JsonListPage path="/api/orders" title="Orders" /> },
-      { path: "trades", element: <JsonListPage path="/api/trades" title="Trades" /> },
-      { path: "events", element: <JsonListPage path="/api/events" title="Events" /> },
+      { path: "orders", element: <JsonListPage path="/api/orders" title="订单记录" /> },
+      { path: "trades", element: <JsonListPage path="/api/trades" title="成交记录" /> },
+      { path: "events", element: <JsonListPage path="/api/events" title="系统事件" /> },
     ],
   },
 ]);

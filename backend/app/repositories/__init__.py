@@ -82,6 +82,21 @@ class OrderRepository:
         )
         return result.scalars().all()
 
+    async def list_reconcilable_opening(self, symbol: str) -> Sequence[Order]:
+        """Return terminal-looking opening rows that can be cleaned after an exchange-flat sync."""
+        result = await self._session.execute(
+            select(Order).where(
+                Order.symbol == symbol,
+                Order.reduce_only.is_(False),
+                Order.status.in_([
+                    OrderStatus.ACK.value,
+                    OrderStatus.OPEN.value,
+                    OrderStatus.PARTIAL.value,
+                ]),
+            )
+        )
+        return result.scalars().all()
+
 
 class PositionRepository:
     """Writes local MIRROR rows. Exchange State > Local DB."""
@@ -89,14 +104,13 @@ class PositionRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get(self, symbol: str) -> Position:
+    async def get_or_none(self, symbol: str) -> Position | None:
         result = await self._session.execute(select(Position).where(Position.symbol == symbol))
-        row = result.scalar_one_or_none()
-        if row is None:
-            row = Position(symbol=symbol, side=PositionSide.FLAT.value, size=Decimal("0"))
-            self._session.add(row)
-            await self._session.flush()
-        return row
+        return result.scalar_one_or_none()
+
+    async def get(self, symbol: str) -> Position | None:
+        """Read-only. Never inserts a fake FLAT row."""
+        return await self.get_or_none(symbol)
 
     async def upsert_mirror(
         self,
@@ -106,12 +120,23 @@ class PositionRepository:
         entry_price: Decimal | None,
         unrealized_pnl: Decimal,
     ) -> Position:
-        row = await self.get(symbol)
-        row.side = side.value
-        row.size = size
-        row.entry_price = entry_price
-        row.unrealized_pnl = unrealized_pnl
-        row.source = "exchange_mirror"
+        row = await self.get_or_none(symbol)
+        if row is None:
+            row = Position(
+                symbol=symbol,
+                side=side.value,
+                size=size,
+                entry_price=entry_price,
+                unrealized_pnl=unrealized_pnl,
+                source="exchange_mirror",
+            )
+            self._session.add(row)
+        else:
+            row.side = side.value
+            row.size = size
+            row.entry_price = entry_price
+            row.unrealized_pnl = unrealized_pnl
+            row.source = "exchange_mirror"
         await self._session.flush()
         return row
 
@@ -224,6 +249,20 @@ class StrategyRepository:
         self._session.add(version)
         await self._session.flush()
         return version
+
+    async def get_by_hash(self, file_hash: str) -> StrategyVersion | None:
+        result = await self._session.execute(
+            select(StrategyVersion).where(StrategyVersion.file_hash == file_hash).order_by(StrategyVersion.id.desc())
+        )
+        return result.scalars().first()
+
+    async def count_by_hash(self, file_hash: str) -> int:
+        from sqlalchemy import func as sa_func
+
+        result = await self._session.execute(
+            select(sa_func.count()).select_from(StrategyVersion).where(StrategyVersion.file_hash == file_hash)
+        )
+        return int(result.scalar() or 0)
 
     async def parameters_for(self, version_id: int) -> Sequence[StrategyParameter]:
         result = await self._session.execute(

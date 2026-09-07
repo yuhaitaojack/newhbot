@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException
@@ -13,7 +14,26 @@ from app.hyperliquid_adapter import ExecutionDisabled
 from app.protocol import PlaceOrderRequest
 
 runtime = build_runtime()
-app = FastAPI(title="newhbot-execution-worker")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Make the local Mock worker usable immediately after a process restart.
+
+    The authenticated Hyperliquid path is intentionally not auto-connected here.
+    Its connection lifecycle remains explicit and subject to the existing safety
+    gates; only the in-memory Mock adapter needs this local bootstrap.
+    """
+    if runtime.config.mode == "mock":
+        await runtime.connect()
+    try:
+        yield
+    finally:
+        if runtime.config.mode == "mock":
+            await runtime.disconnect()
+
+
+app = FastAPI(title="newhbot-execution-worker", lifespan=lifespan)
 
 
 class LeverageBody(BaseModel):
@@ -51,6 +71,12 @@ async def rpc_connect() -> dict:
     return {"ok": True, **runtime.health_payload()}
 
 
+@app.post("/rpc/heartbeat")
+async def rpc_heartbeat() -> dict:
+    runtime.heartbeat()
+    return {"ok": True, **runtime.health_payload()}
+
+
 @app.post("/rpc/disconnect")
 async def rpc_disconnect() -> dict:
     await runtime.disconnect()
@@ -60,6 +86,13 @@ async def rpc_disconnect() -> dict:
 @app.post("/rpc/configure")
 async def rpc_configure(body: ConfigureBody) -> dict:
     runtime.configure(trading_pair=body.trading_pair, slippage=body.slippage, leverage=body.leverage)
+    if runtime.config.mode == "hyperliquid" and runtime.config.execution_enabled and body.leverage is not None:
+        try:
+            await runtime.set_leverage(body.trading_pair, body.leverage)
+        except ExecutionDisabled as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True, "trading_pair": runtime.config.trading_pair}
 
 
@@ -75,6 +108,8 @@ async def rpc_balance() -> dict:
 async def rpc_positions() -> list:
     try:
         return [item.model_dump(mode="json") for item in await runtime.get_positions()]
+    except LookupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
 
@@ -83,6 +118,8 @@ async def rpc_positions() -> list:
 async def rpc_position(symbol: str) -> dict:
     try:
         return (await runtime.get_position(symbol)).model_dump(mode="json")
+    except LookupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
 
@@ -90,6 +127,17 @@ async def rpc_position(symbol: str) -> dict:
 @app.get("/rpc/open_orders")
 async def rpc_open_orders(symbol: str | None = None) -> list:
     return [item.model_dump(mode="json") for item in await runtime.get_open_orders(symbol)]
+
+
+@app.get("/rpc/open_order_precheck")
+async def rpc_open_order_precheck() -> dict:
+    """One-shot official openOrders snapshot. Not an OrderTracker."""
+    from app.open_order_precheck import snapshot_open_orders
+
+    connector = getattr(runtime.inner, "connector", None)
+    inner = getattr(connector, "_inner", lambda: None)()
+    pair = runtime.config.trading_pair
+    return await snapshot_open_orders(inner, configured_pair=pair)
 
 
 @app.get("/rpc/order/{cloid}")
@@ -164,6 +212,12 @@ async def rpc_stream_events() -> StreamingResponse:
 async def rpc_market_data(symbol: str) -> dict:
     data = await runtime.get_market_data(symbol)
     return {key: str(value) for key, value in data.items()}
+
+
+@app.get("/rpc/candles")
+async def rpc_candles(symbol: str, interval: str = "5m", limit: int = 200) -> list[dict]:
+    """Read-only OHLCV endpoint for the future strategy loop."""
+    return await runtime.get_candles(symbol, interval, limit)
 
 
 @app.post("/rpc/test/behavior")

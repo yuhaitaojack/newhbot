@@ -35,7 +35,7 @@ Backend 进入 CONNECTING。持仓仍在交易所。禁止开仓。Worker 起来
 
 Worker 应 **停止接受新的 place**（心跳丢失则 Worker 进入只读或退出）。已发出的交易所订单继续存在。Backend 恢复走 A。
 
-建议：Worker 对 Backend 做心跳；N 秒无心跳则 cancel 非 reduce-only 挂单，**不平仓**（避免 UI 闪断导致误平）。此条 **PHASE 2 实现时再钉超时秒数**。
+Worker 对 Backend 做心跳租约；默认 30 秒无心跳时进入 DEGRADED 并拒绝新的非 reduce-only 开仓，**不自动平仓**（避免 Backend/UI 闪断导致误平）。已提交的减仓/平仓路径仍可执行；Backend 恢复后心跳自动恢复 READY。
 
 ### F. Web UI 崩溃
 

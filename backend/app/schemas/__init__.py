@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,15 +25,15 @@ class SettingsOut(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    trading_pair: str | None = None
+    trading_pair: str | None = Field(default=None, min_length=3, max_length=64, pattern=r"^[A-Za-z0-9]+-[A-Za-z0-9]+$")
     leverage: int | None = Field(default=None, ge=1, le=100)
-    position_percentage: Decimal | None = None
-    order_type: str | None = None
-    limit_timeout: int | None = None
-    slippage: Decimal | None = None
+    position_percentage: Decimal | None = Field(default=None, gt=0, le=100)
+    order_type: Literal["MARKET", "LIMIT"] | None = None
+    limit_timeout: int | None = Field(default=None, ge=1, le=86400)
+    slippage: Decimal | None = Field(default=None, ge=0, lt=1)
     active_strategy: str | None = None
     active_strategy_version: str | None = None
-    estop: bool | None = None
+    # estop cannot be changed here. Use POST /api/trading/clear-estop.
 
 
 class StrategyParameterOut(BaseModel):
@@ -48,6 +49,11 @@ class StrategyParameterOut(BaseModel):
     effective_value: str
 
 
+class StrategyParameterUpdate(BaseModel):
+    enabled: bool | None = None
+    current_value: str | None = Field(default=None, max_length=512)
+
+
 class StrategyVersionOut(BaseModel):
     id: int
     name: str
@@ -55,6 +61,14 @@ class StrategyVersionOut(BaseModel):
     file_hash: str
     path: str
     created_at: datetime
+
+
+class StrategyActivateIn(BaseModel):
+    file_hash: str = Field(min_length=64, max_length=64, pattern=r"^[a-fA-F0-9]{64}$")
+
+
+class StrategyTickIn(BaseModel):
+    snapshot: dict = Field(default_factory=dict)
 
 
 class StrategyOut(BaseModel):
@@ -131,6 +145,7 @@ class HealthOut(BaseModel):
     worker_state: str | None = None
     execution_enabled: bool = False
     sync_status: str | None = None
+    hyperliquid_domain: str | None = None
 
 
 class StatusOut(BaseModel):
@@ -148,3 +163,7 @@ class StatusOut(BaseModel):
     worker_ready: bool = False
     worker_state: str | None = None
     sync_status: str | None = None
+    hyperliquid_domain: str | None = None
+    strategy_loop_running: bool = False
+    strategy_loop_last_error: str | None = None
+    strategy_loop_last_candle_timestamp: int | None = None

@@ -1,0 +1,21 @@
+# EXPLICIT TESTNET EXECUTION OVERRIDE.
+# Do not include this file unless the operator has confirmed the current
+# testnet write test and has independently verified the account and size.
+# Mainnet is intentionally impossible through this example.
+services:
+  execution-worker:
+    environment:
+      EXECUTION_MODE: hyperliquid
+      HYPERLIQUID_DOMAIN: hyperliquid_perpetual_testnet
+      EXECUTION_ENABLED: "true"
+      HUMMINGBOT_LIVE_CONNECTOR: "true"
+      HYPERLIQUID_PERPETUAL_ADDRESS: ${HYPERLIQUID_PERPETUAL_ADDRESS:?set testnet address outside git}
+      HYPERLIQUID_PERPETUAL_SECRET_KEY: ${HYPERLIQUID_PERPETUAL_SECRET_KEY:?set testnet key outside git}
+  backend:
+    environment:
+      EXECUTION_MODE: hyperliquid
+      EXECUTION_ENABLED: "true"
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:?set control token outside git}
+  frontend:
+    environment:
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:?set control token outside git}

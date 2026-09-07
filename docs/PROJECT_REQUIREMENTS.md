@@ -3,7 +3,7 @@
 本文整理当前已确认的全部需求。未在本文出现的能力视为未确认，实现前必须先更新本文。
 
 **产品：** 基于 Hummingbot + Hyperliquid 的单策略自动合约交易系统。  
-**当前阶段：** PHASE 1 架构研究完成；核心业务尚未实现。
+**当前阶段：** 本地安全验证基线已推进至 PHASE 132。控制面、Mock 执行层、策略运行时、Recovery 状态机、持久化、受控撤单与杠杆配置 seam、armed 订单生命周期跟踪与 Runtime 杠杆安全门禁、本地 armed 生命周期闭环、真实 testnet openOrders 开仓前预检、真实 armed 开仓 heartbeat 门禁、主网/testnet 显式域隔离、testnet 认证只读、一次性执行脚本 testnet 确认门禁及 armed heartbeat 安全门禁与 Docker Compose 已实现并完成回归；默认仍关闭真实执行，未连接 Hyperliquid 主网。
 
 ## 1. 交易范围
 
@@ -60,7 +60,9 @@ Web UI 必须提供：
 - 不允许通过修改测试来掩盖代码问题。
 - 每个 Phase 完成必须生成报告并停止，不得擅自进入下一 Phase。
 
-## 6. 非目标（当前明确不做）
+## 6. 历史 PHASE 0/PHASE 1 非目标
+
+以下内容记录的是 PHASE 0/PHASE 1 研究阶段的非目标，不代表当前实现仍未完成；真实主网执行仍受 `AGENTS.md` 和当前会话明确确认约束。
 
 - 多账户、多策略并行、多币种同时交易。
 - 策略直接调用交易所。

@@ -13,7 +13,7 @@ import pytest
 
 from app.config import WorkerConfig
 from app.connector_bridge import FakeConnector
-from app.exchange_models import ExchangeFill, ExchangePosition, InstrumentMeta
+from app.exchange_models import InstrumentMeta
 from app.hyperliquid_adapter import ExecutionDisabled, HyperliquidExecutionAdapter
 from app.instrument_meta import default_btc_instrument_meta, extract_coin_meta
 from app.mapping import map_clearinghouse_positions, map_hummingbot_fill, map_hummingbot_order
@@ -22,7 +22,6 @@ from app.quantization import normalize_order_request, quantize_order_size
 from app.readonly_guard import ReadOnlyGuard, ReadOnlyViolation
 from app.reconciliation import compare_rest_and_hummingbot
 from app.runtime import WorkerRuntime
-from app.state_store import ExchangeStateStore
 from app.factory import build_runtime
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "btc_meta_snapshot.json"
@@ -204,37 +203,34 @@ async def test_fake_foreign_position_recovering_no_autoclose() -> None:
     await adapter.connect()
     assert adapter.foreign_symbols == ["ETH-USD"]
     assert adapter.worker_state().value == "RECOVERING"
+    assert adapter.recovery_reason == "FOREIGN_SYMBOL_POSITION"
     assert connector.cancel_calls == 0
     assert connector.place_calls == 0
 
 
-# --- 9. REST / Hummingbot disagreement is CONFLICT, not silent REST overwrite ---
+# --- 9. Connector is the only execution-layer position source ---
 
 
 @pytest.mark.asyncio
-async def test_fake_rest_hummingbot_conflict_forbids_ready() -> None:
-    connector = FakeConnector()
-    connector.asset_positions = [_pos("BTC", "1")]
-    connector.hummingbot_account_positions = [_pos("BTC", "-1")]
-    adapter = HyperliquidExecutionAdapter(_cfg(), connector)
-    await adapter.connect()
-    assert adapter.store.needs_reconciliation is True
-    assert "disagree" in (adapter.store.conflict_reason or "")
-    assert adapter.worker_state().value == "RECOVERING"
-    runtime = WorkerRuntime(adapter, _cfg())
-    rejected = await runtime.place_order(_req())
-    assert rejected.status == OrderStatus.REJECTED
-    assert "RECOVERING" in (rejected.error or "")
-
-
-@pytest.mark.asyncio
-async def test_fake_rest_hummingbot_agree_then_ready() -> None:
+async def test_fake_second_position_list_cannot_override_connector() -> None:
     connector = FakeConnector()
     connector.asset_positions = [_pos("BTC", "1")]
     adapter = HyperliquidExecutionAdapter(_cfg(), connector)
     await adapter.connect()
-    assert adapter.store.needs_reconciliation is False
+    pos = await adapter.get_position("BTC-USD")
+    assert pos.side == PositionSide.LONG
     assert adapter.worker_state().value == "READY"
+
+
+@pytest.mark.asyncio
+async def test_fake_connector_positions_then_ready() -> None:
+    connector = FakeConnector()
+    connector.asset_positions = [_pos("BTC", "1")]
+    adapter = HyperliquidExecutionAdapter(_cfg(), connector)
+    await adapter.connect()
+    assert adapter.worker_state().value == "READY"
+    pos = await adapter.get_position("BTC-USD")
+    assert pos.side == PositionSide.LONG
 
 
 # --- 10. WS disconnect recovery ---
@@ -259,19 +255,20 @@ async def test_fake_ws_disconnect_degraded_then_resync_ready() -> None:
 
 
 def test_fake_duplicate_fill_not_replayed() -> None:
-    store = ExchangeStateStore()
-    fill = ExchangeFill(
-        fill_id="77",
-        order_id="9",
-        cloid="0x" + "ab" * 16,
-        symbol="BTC-USD",
-        side=OrderSide.BUY,
-        price=Decimal("101"),
-        quantity=Decimal("0.1"),
-    )
-    store.apply_ws_fill(fill)
-    store.apply_ws_fill(fill)
-    assert len(store.fills) == 1
+    connector = FakeConnector()
+    fill = {
+        "tid": "77",
+        "oid": "9",
+        "cloid": "0x" + "ab" * 16,
+        "coin": "BTC",
+        "side": "B",
+        "px": "101",
+        "sz": "0.1",
+        "fee": "0",
+    }
+    connector.record_fill(fill)
+    connector.record_fill(fill)
+    assert len(connector.fills) == 1
 
 
 # --- 12. stale BTC when REST omits it ---
@@ -283,11 +280,13 @@ async def test_fake_stale_btc_dropped_when_rest_omits_it() -> None:
     connector.asset_positions = [_pos("BTC", "1"), _pos("ETH", "2")]
     adapter = HyperliquidExecutionAdapter(_cfg(), connector)
     await adapter.connect()
-    assert "BTC-USD" in adapter.store.positions
+    symbols = {item.symbol for item in await adapter.get_positions()}
+    assert "BTC-USD" in symbols
     connector.asset_positions = [_pos("ETH", "2")]
-    await adapter._rest_snapshot()
-    assert "BTC-USD" not in adapter.store.positions
-    assert "ETH-USD" in adapter.store.positions
+    await adapter._refresh_from_connector()
+    symbols = {item.symbol for item in await adapter.get_positions()}
+    assert "BTC-USD" not in symbols
+    assert "ETH-USD" in symbols
     assert adapter.foreign_symbols == ["ETH-USD"]
     assert adapter.worker_state().value == "RECOVERING"
 
@@ -299,9 +298,8 @@ async def test_fake_btc_flat_eth_absent_ready() -> None:
     adapter = HyperliquidExecutionAdapter(_cfg(), connector)
     await adapter.connect()
     connector.asset_positions = []
-    await adapter._rest_snapshot()
-    adapter.store.mark_ws(True)
-    assert adapter.store.positions == {}
+    await adapter._refresh_from_connector()
+    assert await adapter.get_positions() == []
     assert adapter.foreign_symbols == []
     assert adapter.worker_state().value == "READY"
 
@@ -343,15 +341,31 @@ async def test_fake_readonly_adapter_never_places() -> None:
         await adapter.cancel_order("0x" + "b" * 32, "r1")
 
 
+def test_hyperliquid_mode_without_package_raises() -> None:
+    from app.hummingbot_readonly import try_load_hummingbot_connector_class
+
+    if try_load_hummingbot_connector_class() is not None:
+        pytest.skip("REAL CONNECTOR is importable here; see Docker runtime tests")
+    with pytest.raises(RuntimeError, match="requires hummingbot"):
+        build_runtime(_cfg())
+
+
 def test_live_connector_without_package_raises() -> None:
     from app.hummingbot_readonly import try_load_hummingbot_connector_class
 
     if try_load_hummingbot_connector_class() is not None:
         pytest.skip("REAL CONNECTOR is importable here; see test_phase4_real_connector.py")
-    with pytest.raises(RuntimeError, match="not importable"):
+    with pytest.raises(RuntimeError, match="requires hummingbot"):
         build_runtime(_cfg(use_live_connector=True))
 
 
-def test_live_connector_rejects_execution_enabled() -> None:
-    with pytest.raises(RuntimeError, match="EXECUTION_ENABLED"):
+def test_factory_rejects_execution_enabled_without_credentials(monkeypatch) -> None:
+    monkeypatch.setattr("app.factory.load_account_credentials", lambda: None)
+    with pytest.raises(RuntimeError, match="EXECUTION_ENABLED requires authenticated"):
+        build_runtime(_cfg(execution_enabled=True))
+
+
+def test_live_connector_rejects_execution_enabled_without_credentials(monkeypatch) -> None:
+    monkeypatch.setattr("app.factory.load_account_credentials", lambda: None)
+    with pytest.raises(RuntimeError, match="EXECUTION_ENABLED requires authenticated"):
         build_runtime(_cfg(use_live_connector=True, execution_enabled=True))

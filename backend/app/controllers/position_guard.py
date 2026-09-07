@@ -35,7 +35,7 @@ class PositionGuard:
         if not inp.exchange_connected:
             return GuardResult(False, "exchange connection unavailable")
         if inp.has_foreign_positions:
-            return GuardResult(False, "account has a position on a non-configured pair")
+            return GuardResult(False, "FOREIGN_SYMBOL_POSITION")
         if inp.has_unknown_orders:
             return GuardResult(False, "unknown order exists; new opens are forbidden")
         if inp.has_open_reservation:
@@ -44,12 +44,12 @@ class PositionGuard:
             return GuardResult(False, "recovery forbids new opens")
         if inp.system_state != SystemState.RUNNING:
             return GuardResult(False, f"system is {inp.system_state.value}, not RUNNING")
+        if inp.exchange_side == PositionSide.UNKNOWN or inp.local_side == PositionSide.UNKNOWN:
+            return GuardResult(False, "position side is UNKNOWN")
         if inp.local_side != PositionSide.FLAT:
             return GuardResult(False, f"local position is {inp.local_side.value}, not FLAT")
         if inp.exchange_side != PositionSide.FLAT:
             return GuardResult(False, f"exchange position is {inp.exchange_side.value}, not FLAT")
-        if inp.exchange_side == PositionSide.UNKNOWN or inp.local_side == PositionSide.UNKNOWN:
-            return GuardResult(False, "position side is UNKNOWN")
         return GuardResult(True, "ok")
 
     def reverse_is_forbidden(self, local: PositionSide, signal: SignalType) -> bool:

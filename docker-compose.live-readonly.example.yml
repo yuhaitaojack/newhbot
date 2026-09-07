@@ -1,0 +1,23 @@
+# Optional local override for authenticated Hyperliquid READ-ONLY verification.
+# Never enable execution in this file. Keep the real values in an untracked
+# environment or Docker secret, not in this example.
+services:
+  execution-worker:
+    environment:
+      EXECUTION_MODE: hyperliquid
+      # Safe default is Hyperliquid testnet. Mainnet requires an explicit
+      # HYPERLIQUID_DOMAIN=hyperliquid_perpetual override outside git.
+      HYPERLIQUID_DOMAIN: ${HYPERLIQUID_DOMAIN:-hyperliquid_perpetual_testnet}
+      # Safe default. Set EXECUTION_ENABLED=true only in an explicit live run.
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      HUMMINGBOT_LIVE_CONNECTOR: "true"
+      HYPERLIQUID_PERPETUAL_ADDRESS: ${HYPERLIQUID_PERPETUAL_ADDRESS:?set address outside git}
+      HYPERLIQUID_PERPETUAL_SECRET_KEY: ${HYPERLIQUID_PERPETUAL_SECRET_KEY:?set key outside git}
+  backend:
+    environment:
+      EXECUTION_MODE: hyperliquid
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:?set control token outside git}
+  frontend:
+    environment:
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:?set control token outside git}

@@ -3,14 +3,15 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.protocol import OrderSide
-from app.quantization import quantize_order_price
 
 
-def ioc_limit_price(*, side: OrderSide, mid: Decimal, slippage: Decimal, tick: Decimal) -> Decimal:
+def ioc_raw_price(*, side: OrderSide, mid: Decimal, slippage: Decimal) -> Decimal:
     """IOC protective limit used as Hyperliquid 'market' (connector v2.16.0).
 
     BUY (open long or close short): mid * (1 + slippage) — must not be below market.
     SELL (open short or close long): mid * (1 - slippage) — must not be above market.
+
+    Production Adapter quantizes this with the Connector, not app.quantization.
     """
     if mid <= 0:
         raise ValueError("mid price must be positive")
@@ -22,7 +23,14 @@ def ioc_limit_price(*, side: OrderSide, mid: Decimal, slippage: Decimal, tick: D
         raw = mid * (Decimal("1") - slippage)
     if raw <= 0:
         raise ValueError("IOC price collapsed to non-positive; slippage too large")
-    return quantize_order_price(raw, tick)
+    return raw
+
+
+def ioc_limit_price(*, side: OrderSide, mid: Decimal, slippage: Decimal, tick: Decimal) -> Decimal:
+    """Characterization helper. Production path uses Connector.quantize_order_price."""
+    from app.quantization import quantize_order_price
+
+    return quantize_order_price(ioc_raw_price(side=side, mid=mid, slippage=slippage), tick)
 
 
 def close_side_for_position(position_side: str) -> OrderSide:

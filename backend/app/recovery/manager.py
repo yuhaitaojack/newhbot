@@ -28,9 +28,16 @@ class RecoveryManager:
             return await self._set_state(session, SystemState.RECOVERY, "unresolved_orders_on_boot")
         if settings.estop:
             return await self._set_state(session, SystemState.STOPPED, "estop_latched")
-        connected = await self._execution.health()
+        if settings.system_state == SystemState.RECOVERY.value:
+            return await self._set_state(session, SystemState.RECOVERY, "recovery_persisted")
+        try:
+            connected = await self._execution.health()
+        except Exception as exc:
+            return await self._set_state(
+                session, SystemState.RECOVERY, f"worker_health_query_failed:{type(exc).__name__}"
+            )
         if not connected:
-            return await self._set_state(session, SystemState.CONNECTING, "worker_unreachable")
+            return await self._set_state(session, SystemState.RECOVERY, "worker_unreachable")
         if settings.trading_enabled:
             return await self._set_state(session, SystemState.RUNNING, "persisted_running")
         return await self._set_state(session, SystemState.STOPPED, "bootstrap")

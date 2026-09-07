@@ -1,3 +1,8 @@
+"""TEST HELPER ONLY. Production Adapter does not compare a Worker REST list
+against a second Hummingbot list. Connector account_positions is the only
+execution-layer position source.
+"""
+
 from __future__ import annotations
 
 from app.exchange_models import ExchangePosition
@@ -16,9 +21,9 @@ def compare_rest_and_hummingbot(
     rest: list[ExchangePosition],
     hummingbot: list[ExchangePosition],
 ) -> str | None:
-    """None means READY-eligible agreement. Otherwise CONFLICT reason.
+    """None means agreement. Otherwise a disagreement reason.
 
-    Do not silently prefer REST over Hummingbot cache. Disagreement is a conflict.
+    Not used on the production Adapter path after STEP 2.
     """
     rest_fp = position_fingerprint(rest)
     hb_fp = position_fingerprint(hummingbot)
